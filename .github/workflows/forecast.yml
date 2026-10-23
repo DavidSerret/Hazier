@@ -1,13 +1,13 @@
 name: forecast
 
 on:
-  # TODO: re-enable the 6-hourly schedule once the pipeline works end to end.
+  # TODO: re-enable the 6-hourly schedule after a first successful manual run on GitHub.
   # schedule:
   #   - cron: "0 */6 * * *"
   workflow_dispatch:
 
 permissions:
-  contents: write # TODO: needed only for the data/history commit step below
+  contents: write # the run history in data/history is committed back
   pages: write
   id-token: write
 
@@ -30,18 +30,29 @@ jobs:
       - name: Install pipeline
         run: pip install -e pipeline
 
+      # Writes pipeline/output/site/forecast.json and appends a line to data/history/runs.csv.
+      # Exits non-zero when no usable forecast can be made (FIRMS or winds down, or validation
+      # failed). The build and deploy steps below are then skipped, so GitHub Pages keeps
+      # serving the last valid forecast; the failed run is still recorded in the history.
       - name: Run pipeline
         env:
           # TODO: add the FIRMS_MAP_KEY repository secret (Settings > Secrets and variables > Actions)
           FIRMS_MAP_KEY: ${{ secrets.FIRMS_MAP_KEY }}
-        # TODO: the entry point currently exits with an error until the pipeline is implemented
         run: python -m hazier
 
-      # TODO: if a source fails, fall back to the last published forecast.json and flag it
-
-      # TODO: commit the light history in data/history/ to keep the cron alive
-      # (scheduled workflows are disabled after 60 days without repository activity).
-      # Never commit forecast.json itself.
+      # Runs even when the pipeline failed: the history keeps the scheduled workflow alive
+      # (scheduled workflows are disabled after 60 days without repository activity) and
+      # records failures for verification. forecast.json itself is never committed.
+      - name: Commit run history
+        if: always()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/history/
+          if git diff --cached --quiet; then exit 0; fi
+          git commit -m "Forecast run history $(date -u +%Y-%m-%dT%H:%MZ)"
+          git pull --rebase --autostash
+          git push
 
       - uses: actions/setup-node@v4
         with:
@@ -55,9 +66,8 @@ jobs:
           npm ci
           npm run build
 
-      # TODO: confirm the path where the pipeline writes forecast.json
       - name: Add forecast to site
-        run: cp pipeline/forecast.json web/dist/forecast.json
+        run: cp pipeline/output/site/forecast.json web/dist/forecast.json
 
       - uses: actions/upload-pages-artifact@v3
         with:

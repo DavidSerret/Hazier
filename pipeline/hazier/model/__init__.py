@@ -1,1 +1,1 @@
-"""Trajectory and risk model."""
+"""Trajectory and smoke model."""

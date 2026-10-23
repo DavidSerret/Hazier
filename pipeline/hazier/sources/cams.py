@@ -2,7 +2,7 @@
 
 CAMS is far more accurate than Hazier's own smoke index for "how much PM2.5", so the air
 quality level users see is the CAMS PM2.5 and its Malaysian API category. Hazier adds the
-arrival time and the origin of the smoke (see model/risk.py).
+arrival time and the origin of the smoke (see model/smoke.py).
 
 This module fetches:
 - the hourly PM2.5 at the 8 zone centres, for the zone cards (category now, peak, trend);
@@ -58,7 +58,7 @@ Failure handling matches the other sources: the fetch functions never raise and 
 status that is ok, degraded (some points have no data) or failed (none).
 
 Debug: `python -m hazier.sources.cams` runs the real fetch (zones and grid) and prints a summary.
-The full table with Hazier's smoke timing is printed by `python -m hazier.model.risk`.
+The full table with Hazier's smoke timing is printed by `python -m hazier.model.smoke`.
 """
 
 from __future__ import annotations

@@ -7,7 +7,7 @@ from helpers import cluster, hotspot, uniform
 
 from hazier import config
 from hazier.geo import great_circle_km
-from hazier.model import risk
+from hazier.model import smoke as sm
 from hazier.model import trajectories as tj
 from hazier.schema import ZoneForecast
 
@@ -19,9 +19,9 @@ ARRIVAL = config.SMOKE_ARRIVAL_THRESHOLD
 def smoke(clusters, field, zones=config.ZONES, lifetime_hours=None):
     """Release, advect with dispersion and accumulate: the smoke part of run_model."""
     particles = tj.release_particles(clusters)
-    acc = risk.ZoneAccumulator(zones, len(clusters), lifetime_hours)
+    acc = sm.ZoneAccumulator(zones, len(clusters), lifetime_hours)
     tj.advect(field, particles, [acc])
-    return {s.zone.id: s for s in risk.zone_smoke(acc, clusters)}
+    return {s.zone.id: s for s in sm.zone_smoke(acc, clusters)}
 
 
 # Fire 293 km due south of Klang Valley, wind blowing north at 5 m/s (18 km/h): the plume
@@ -60,7 +60,7 @@ def particles_north_of_kl(release_hours):
 
 def test_accumulator_counts_particles_within_the_radius():
     particles = particles_north_of_kl([1.0, 1.0, 1.0])  # observed at their release: age 0
-    acc = risk.ZoneAccumulator((KL,), n_clusters=2)
+    acc = sm.ZoneAccumulator((KL,), n_clusters=2)
     acc.start(particles, np.arange(3.0))
     acc.observe(1, np.arange(3), particles.lat0, particles.lon0)
     assert acc.load[0].tolist() == [0.0, 3.0, 0.0]
@@ -69,7 +69,7 @@ def test_accumulator_counts_particles_within_the_radius():
 
 def test_accumulator_applies_removal_by_age():
     particles = particles_north_of_kl([-24.0, -24.0, -24.0])  # released a day before t0
-    acc = risk.ZoneAccumulator((KL,), n_clusters=2, lifetime_hours=72.0)
+    acc = sm.ZoneAccumulator((KL,), n_clusters=2, lifetime_hours=72.0)
     hours = np.arange(-24.0, 3.0)
     acc.start(particles, hours)
     acc.observe(26, np.arange(3), particles.lat0, particles.lon0)  # hour 2: age 26 h
@@ -151,22 +151,22 @@ def test_smoke_is_reproducible():
 
 def test_source_shares_use_largest_remainder():
     clusters = [cluster(i, 0.0, 100.0, 1.0, r) for i, r in enumerate(["A", "B", "C", ""])]
-    shares = risk.source_shares(np.array([1.0, 1.0, 1.0, 0.0]), clusters)
+    shares = sm.source_shares(np.array([1.0, 1.0, 1.0, 0.0]), clusters)
     assert [(s.region, s.share) for s in shares] == [("A", 0.334), ("B", 0.333), ("C", 0.333)]
-    other = risk.source_shares(np.array([0.0, 0.0, 0.0, 2.0]), clusters)
+    other = sm.source_shares(np.array([0.0, 0.0, 0.0, 2.0]), clusters)
     assert [(s.region, s.share) for s in other] == [("Other", 1.0)]
-    assert risk.source_shares(np.zeros(4), clusters) == []
+    assert sm.source_shares(np.zeros(4), clusters) == []
 
 
 def test_eta_range_is_the_climb_around_the_threshold():
     hours = np.arange(73.0)
     ramp = np.clip((hours - 10) * ARRIVAL / 4, 0, None)  # reaches the threshold at 14 h
     # half of it at 12 h, twice it at 18 h
-    assert risk.eta_range(ramp, hours, ARRIVAL) == (12.0, 18.0)
+    assert sm.eta_range(ramp, hours, ARRIVAL) == (12.0, 18.0)
     marginal = np.minimum(ramp, 1.5 * ARRIVAL)  # never reaches twice the threshold
-    assert risk.eta_range(marginal, hours, ARRIVAL) == (12.0, None)
+    assert sm.eta_range(marginal, hours, ARRIVAL) == (12.0, None)
     faint = np.minimum(ramp, 0.9 * ARRIVAL)  # never reaches it: no ETA, no range
-    assert risk.eta_range(faint, hours, ARRIVAL) == (None, None)
+    assert sm.eta_range(faint, hours, ARRIVAL) == (None, None)
 
 
 def test_published_zone_has_no_smoke_level():
@@ -176,10 +176,10 @@ def test_published_zone_has_no_smoke_level():
 
 
 def test_fmt_eta():
-    assert risk.fmt_eta(None, None, None) == "-"
-    assert risk.fmt_eta(0.0, 0.0, 0.0) == "already at t0"
-    assert risk.fmt_eta(14.0, 12.0, 18.0) == "14 h (12 to 18)"
-    assert risk.fmt_eta(7.0, 5.0, None) == "7 h (5 to >72)"
+    assert sm.fmt_eta(None, None, None) == "-"
+    assert sm.fmt_eta(0.0, 0.0, 0.0) == "already at t0"
+    assert sm.fmt_eta(14.0, 12.0, 18.0) == "14 h (12 to 18)"
+    assert sm.fmt_eta(7.0, 5.0, None) == "7 h (5 to >72)"
 
 
 # --- the whole chain -------------------------------------------------------------------
@@ -188,7 +188,7 @@ def test_fmt_eta():
 def test_run_model_end_to_end():
     # 20 hotspots of 50 MW in one cell near Pekanbaru: one 1000 MW cluster in Riau.
     hotspots = [hotspot(0.5 + 0.005 * i, 101.69, 50.0, i=i) for i in range(20)]
-    run = risk.run_model(hotspots, NORTHWARD, extra_lifetimes=(48.0, 120.0))
+    run = sm.run_model(hotspots, NORTHWARD, extra_lifetimes=(48.0, 120.0))
     assert [(c.region, c.frp_mw) for c in run.clusters] == [("Riau", 1000.0)]
     assert run.n_particles == 72 * config.PARTICLES_PER_RELEASE and run.n_tracers == 72
     zones = {z.id: z for z in run.zones}
@@ -204,6 +204,6 @@ def test_run_model_end_to_end():
 
 
 def test_smoke_model_metadata():
-    meta = risk.smoke_model_metadata(uniform(0.0, 5.0, past_hours=48))
+    meta = sm.smoke_model_metadata(uniform(0.0, 5.0, past_hours=48))
     assert meta.removal_lifetime_hours == 72.0 and meta.arrival_threshold == ARRIVAL
     assert meta.past_hours == 48 and meta.lookback_hours == 48 and meta.level_hpa == 850

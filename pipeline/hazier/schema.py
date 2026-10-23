@@ -7,13 +7,21 @@ Conventions:
 - All timestamps are ISO 8601 strings in UTC (for example "2026-09-14T06:00:00Z").
   The web converts them to Malaysia time (MYT, UTC+8) for display.
 - Coordinates are (lon, lat) pairs in degrees, the order MapLibre and deck.gl expect.
-- "hours" and "hour" are offsets from generated_at, in hours.
+- "hours" and "hour" are offsets from generated_at, in hours. generated_at is t0, the start of
+  the forecast window (the hour the run was made in).
+
+validate_forecast() checks a Forecast against the types below and a few invariants the web
+relies on; the pipeline runs it before writing forecast.json.
 """
 
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass, field
+import math
+import types
+import typing
+from dataclasses import asdict, dataclass, field, fields, is_dataclass
+from datetime import datetime
 from typing import Literal
 
 SCHEMA_VERSION = 1
@@ -102,7 +110,7 @@ class ZoneForecast:
     radius_km: float
     # Hazier: when smoke from the fires detected in the last 48 h reaches the zone. 0 means it
     # is already there at t0; null means not within the horizon. The range is the time the
-    # smoke takes to build up around the arrival threshold (see risk.py); earliest and latest
+    # smoke takes to build up around the arrival threshold (see model/smoke.py); earliest and latest
     # are null with the ETA, and latest alone is null for "possibly after 72 h".
     smoke_eta_hours: float | None
     smoke_eta_earliest_hours: float | None
@@ -214,3 +222,105 @@ class Forecast:
         # slipped through into an error instead of invalid JSON.
         separators = None if indent else (",", ":")
         return json.dumps(self.to_dict(), indent=indent, separators=separators, allow_nan=False)
+
+
+# --- Validation ----------------------------------------------------------------------------
+
+
+def _type_errors(value: object, tp: object, path: str) -> list[str]:
+    """Errors of value against a type annotation of this module (empty when it matches)."""
+    origin, args = typing.get_origin(tp), typing.get_args(tp)
+    if origin in (typing.Union, types.UnionType):
+        options = [_type_errors(value, a, path) for a in args]
+        return [] if any(not o for o in options) else min(options, key=len)
+    if origin is Literal:
+        return [] if value in args else [f"{path}: {value!r} is not one of {args}"]
+    if tp is type(None):
+        return [] if value is None else [f"{path}: expected null"]
+    if origin is list:
+        if not isinstance(value, list):
+            return [f"{path}: expected a list"]
+        return [e for i, v in enumerate(value) for e in _type_errors(v, args[0], f"{path}[{i}]")]
+    if origin is tuple:
+        if not isinstance(value, tuple | list) or len(value) != len(args):
+            return [f"{path}: expected {len(args)} values"]
+        return [
+            e
+            for i, (v, a) in enumerate(zip(value, args))
+            for e in _type_errors(v, a, f"{path}[{i}]")
+        ]
+    if origin is dict:
+        if not isinstance(value, dict):
+            return [f"{path}: expected an object"]
+        return [
+            e
+            for k, v in value.items()
+            for e in _type_errors(k, args[0], f"{path} key")
+            + _type_errors(v, args[1], f"{path}.{k}")
+        ]
+    if is_dataclass(tp):
+        if not isinstance(value, tp):
+            return [f"{path}: expected {tp.__name__}"]
+        hints = typing.get_type_hints(tp)
+        return [
+            e
+            for f in fields(tp)
+            for e in _type_errors(getattr(value, f.name), hints[f.name], f"{path}.{f.name}")
+        ]
+    if tp is float:
+        if isinstance(value, bool) or not isinstance(value, int | float):
+            return [f"{path}: expected a number"]
+        return [] if math.isfinite(value) else [f"{path}: {value} is not finite"]
+    if tp is int:
+        ok = isinstance(value, int) and not isinstance(value, bool)
+        return [] if ok else [f"{path}: expected an integer"]
+    if tp in (str, bool):
+        return [] if isinstance(value, tp) else [f"{path}: expected {tp.__name__}"]
+    return [f"{path}: unsupported annotation {tp!r}"]
+
+
+def _is_utc_iso(text: str) -> bool:
+    try:
+        datetime.strptime(text, "%Y-%m-%dT%H:%M:%SZ")
+    except ValueError:
+        return False
+    return True
+
+
+def validate_forecast(fc: Forecast) -> list[str]:
+    """All the problems found in a Forecast; an empty list means it can be published."""
+    errors = _type_errors(fc, Forecast, "forecast")
+    if errors:
+        return errors  # the invariants below assume the types are right
+    if not _is_utc_iso(fc.generated_at):
+        errors.append(f"generated_at: {fc.generated_at!r} is not UTC ISO 8601")
+    if fc.schema_version != SCHEMA_VERSION:
+        errors.append(f"schema_version: {fc.schema_version} != {SCHEMA_VERSION}")
+    cluster_ids = [c.id for c in fc.clusters]
+    if len(set(cluster_ids)) != len(cluster_ids):
+        errors.append("clusters: duplicate ids")
+    for t in fc.trajectories:
+        if t.cluster_id not in set(cluster_ids):
+            errors.append(f"trajectory {t.id}: unknown cluster {t.cluster_id}")
+        if len(t.path) != len(t.hours) or len(t.path) < 2:
+            errors.append(f"trajectory {t.id}: path and hours differ in length or are too short")
+        if any(b < a for a, b in zip(t.hours, t.hours[1:])) or (t.hours and t.hours[0] < 0):
+            errors.append(f"trajectory {t.id}: hours must start at 0 or later and increase")
+    zone_ids = [z.id for z in fc.zones]
+    if len(set(zone_ids)) != len(zone_ids):
+        errors.append("zones: duplicate ids")
+    for z in fc.zones:
+        if z.smoke_sources and abs(sum(s.share for s in z.smoke_sources) - 1.0) > 1e-6:
+            errors.append(f"zone {z.id}: smoke source shares do not sum to 1")
+        if z.smoke_eta_hours is None and (z.smoke_eta_earliest_hours or z.smoke_eta_latest_hours):
+            errors.append(f"zone {z.id}: ETA range without an ETA")
+        for p in [z.cams_now, z.cams_peak, *z.cams_pm25]:
+            if p is not None and not _is_utc_iso(p.time):
+                errors.append(f"zone {z.id}: CAMS time {p.time!r} is not UTC ISO 8601")
+    for h in fc.hotspots:
+        if not _is_utc_iso(h.acquired_at):
+            errors.append(f"hotspot {h.id}: acquired_at is not UTC ISO 8601")
+    g = fc.pm25_grid
+    if g is not None and len(g.values) != len(g.hours) * len(g.lats) * len(g.lons):
+        errors.append("pm25_grid: values do not match hours x lats x lons")
+    return errors

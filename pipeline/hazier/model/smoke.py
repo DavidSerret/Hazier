@@ -65,7 +65,7 @@ The share of the zone's smoke, summed over the forecast hours (after removal), t
 each source region (the province, state or country of each cluster, see regions.py). Shares are
 rounded to 0.1% with the largest-remainder method, so they always add up to exactly 100%.
 
-Debug: `python -m hazier.model.risk` runs FIRMS, winds (cached), CAMS and the model for real,
+Debug: `python -m hazier.model.smoke` runs FIRMS, winds (cached), CAMS and the model for real,
 prints the zone table and the removal sensitivity, and saves pipeline/output/trajectories.png.
 """
 

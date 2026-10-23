@@ -4,7 +4,7 @@ Haze forecaster for Malaysia and the southern ASEAN region. It predicts whether,
 
 Hazier does not replace the CAMS (Copernicus) PM2.5 forecast: the air quality level it shows is the CAMS PM2.5 and its Malaysian API category. What Hazier adds is source attribution (which provinces the smoke comes from), a readable arrival time ("smoke reaches Klang Valley in about 30 h") and the smoke paths.
 
-Status: early scaffold, no forecasting logic yet.
+Status: the pipeline works end to end and writes `forecast.json`; the web app is next.
 
 ## How it works
 
@@ -33,19 +33,22 @@ pip install -e ".[dev]"
 pytest
 ```
 
-Real FIRMS fetch (needs a free MAP_KEY from https://firms.modaps.eosdis.nasa.gov/api/map_key/):
+Full pipeline (needs a free FIRMS MAP_KEY from https://firms.modaps.eosdis.nasa.gov/api/map_key/):
 
 ```
 cd pipeline
 copy .env.example .env        # then put your key in .env
-.venv\Scripts\python.exe -m hazier.sources.firms
+.venv\Scripts\python.exe -m hazier
 ```
 
-Other debug commands (from `pipeline/`):
+It writes `pipeline/output/site/forecast.json` (git-ignored), appends one line to `data/history/runs.csv` and prints a one-screen summary. Without cache a run takes about 5 minutes and 1,100 Open-Meteo calls; winds and the CAMS grid are cached per model run, so repeated local runs are fast. Use `--no-history` for test runs you do not want recorded. Exit codes: 0 forecast written, 1 no usable forecast (FIRMS or winds unavailable, the previous file is kept), 2 forecast failed validation (the previous file is kept).
+
+Debug commands for single steps (from `pipeline/`):
 
 ```
+.venv\Scripts\python.exe -m hazier.sources.firms          # FIRMS hotspots per satellite
 .venv\Scripts\python.exe -m hazier.sources.winds          # 850 hPa winds, cached per model run
-.venv\Scripts\python.exe -m hazier.model.risk             # full model: zone table (CAMS level, smoke ETA, origin), saves output/trajectories.png
+.venv\Scripts\python.exe -m hazier.model.smoke            # full model: zone table (CAMS level, smoke ETA, origin), saves output/trajectories.png
 .venv\Scripts\python.exe -m hazier.sources.cams           # CAMS PM2.5 for the zones and the map grid (--no-grid for zones only)
 ```
 

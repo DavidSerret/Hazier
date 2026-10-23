@@ -79,7 +79,7 @@ CLUSTER_MIN_FRP_MW = 25.0
 # Particle release: every cluster releases PARTICLES_PER_RELEASE particles at t0 and then every
 # RELEASE_INTERVAL_HOURS until the end of the horizon, as if the fires kept burning.
 # The interval must be a multiple of STEP_HOURS. Hourly releases keep consecutive puffs about
-# 20 km apart, well inside a 50 km zone, so zone risk does not flicker between puffs.
+# 20 km apart, well inside a 50 km zone, so a zone's smoke does not flicker between puffs.
 RELEASE_INTERVAL_HOURS = 1
 PARTICLES_PER_RELEASE = 20
 
@@ -96,7 +96,7 @@ HORIZONTAL_DIFFUSIVITY_M2S = 2.0e4
 # identical forecasts.
 RANDOM_SEED = 2026
 
-# Trajectories exported to forecast.json. The risk uses all particles; the web gets this many
+# Trajectories exported to forecast.json. The smoke model uses all particles; the web gets this many
 # display trajectories (one undispersed tracer per release, see trajectories.py).
 TRAJ_EXPORT_MAX = 300
 # A trajectory passing within this distance of a zone's edge is "near" that zone and shown first.
@@ -107,11 +107,11 @@ TRAJ_EXPORT_PRIORITY_SHARE = 0.6
 TRAJ_EXPORT_DECIMALS = 2
 
 # Smoke removal: particle weights decay as exp(-age / lifetime), age counted from the release.
-# 3 days is typical for fine smoke aerosol in the humid tropics, see risk.py.
+# 3 days is typical for fine smoke aerosol in the humid tropics, see model/smoke.py.
 REMOVAL_LIFETIME_HOURS = 72.0
 
 # Arrival of smoke at a zone (internal, for the ETA and the agreement flag; NOT an air quality
-# level): the first hour the smoke index reaches this value. PROVISIONAL, see risk.py.
+# level): the first hour the smoke index reaches this value. PROVISIONAL, see model/smoke.py.
 # With the 3-day removal, 10 is about what one cluster of 360 MW (summed FRP over 48 h, the
 # upper quartile of the 23 Oct 2026 clusters) gives when a third of its plume covers a zone
 # after a day of travel: (360 / 48) * 5.5 h * 1/3 * exp(-24 / 72). Smaller fires count only
@@ -120,7 +120,7 @@ REMOVAL_LIFETIME_HOURS = 72.0
 SMOKE_ARRIVAL_THRESHOLD = 10.0
 
 # ETA range: from the first hour the smoke index reaches threshold / factor to the first hour it
-# reaches threshold * factor (see risk.py).
+# reaches threshold * factor (see model/smoke.py).
 ETA_RANGE_FACTOR = 2.0
 
 # Zone receptors: circles of this radius around each centre.
@@ -226,3 +226,15 @@ CAMS_GRID_BATCH_SIZE = 50
 CAMS_GRID_MAX_CALLS_PER_MIN = 250
 # Exported values are rounded to this step (ug/m3) and written as integers.
 CAMS_GRID_QUANTUM_UGM3 = 1.0
+
+# --- Export (python -m hazier) ---------------------------------------------------------------
+
+# forecast.json goes here (pipeline/output is git-ignored); the workflow copies it into the site.
+OUTPUT_DIRNAME = "site"
+FORECAST_FILENAME = "forecast.json"
+# Light history, one CSV line per run, committed by the workflow (it keeps the scheduled
+# workflow alive and feeds phase 2 verification). Relative to the repository root.
+HISTORY_RELPATH = "data/history/runs.csv"
+# Raw hotspots in forecast.json: the strongest by FRP. All 15,000+ of a busy day would add
+# about 2.2 MB; the clusters, all exported, already carry the full picture.
+EXPORT_HOTSPOTS_MAX = 1500

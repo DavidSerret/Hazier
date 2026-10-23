@@ -7,7 +7,7 @@ import pytest
 from helpers import T0, cluster, hotspot, particles_at, uniform
 
 from hazier import config
-from hazier.model import risk
+from hazier.model import smoke as sm
 from hazier.model import trajectories as tj
 
 KL = next(z for z in config.ZONES if z.id == "klang_valley")
@@ -112,7 +112,7 @@ def test_observers_ignore_the_past():
     )  # fmt: skip
     # No removal here, so the grid must hold exactly weight x forecast hours.
     density = tj.DensityGrid(cell_deg=0.5, lifetime_hours=float("inf"))
-    acc = risk.ZoneAccumulator((KL,), 1)
+    acc = sm.ZoneAccumulator((KL,), 1)
     adv = tj.advect(field, parts, [density, acc])
     k0 = adv.t0_index
     forecast_steps = np.clip(adv.end_step - np.maximum(adv.release_step, k0) + 1, 0, None)
@@ -163,9 +163,9 @@ SOUTH_OF_KL = (KL.lat - 2.64, KL.lon)
 
 def zone_series(clusters, field, t0=T0):
     particles = tj.release_particles(clusters, t0=t0, earliest_hour=float(field.hours[0]))
-    acc = risk.ZoneAccumulator(config.ZONES, len(clusters))
+    acc = sm.ZoneAccumulator(config.ZONES, len(clusters))
     tj.advect(field, particles, [acc])
-    return {z.zone.id: z for z in risk.zone_smoke(acc, clusters)}
+    return {z.zone.id: z for z in sm.zone_smoke(acc, clusters)}
 
 
 def test_smoke_released_before_t0_is_over_the_zone_at_t0():
@@ -198,7 +198,7 @@ def test_run_model_carries_past_smoke():
     field = uniform(0.0, 5.0, past_hours=48)
     hotspots = [hotspot(SOUTH_OF_KL[0] + 0.005 * i, SOUTH_OF_KL[1], 50.0, iso(-30), i)
                 for i in range(20)]  # fmt: skip
-    run = risk.run_model(hotspots, field)
+    run = sm.run_model(hotspots, field)
     assert run.clusters[0].first_at == iso(-30)
     assert run.n_past_particles == 30 * config.PARTICLES_PER_RELEASE
     assert 0 < run.n_in_air_at_t0 <= run.n_past_particles

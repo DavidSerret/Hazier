@@ -2,7 +2,7 @@
 
 This is the physics core. It answers one question: if the fires seen in the last 48 h keep
 burning, where does their smoke travel over the next 72 h? Risk, ETA and attribution per zone
-are computed in risk.py from what this module produces.
+are computed in smoke.py from what this module produces.
 
 Time runs from 48 h before t0 (the current hour) to 72 h after it. Smoke emitted since each
 fire was first seen is carried with the past winds up to t0, so the smoke already in the air
@@ -526,7 +526,7 @@ def removal_factor(age_hours, lifetime_hours: float | None = None) -> np.ndarray
     """Share of a particle's smoke still airborne after age_hours: exp(-age / lifetime).
 
     First-order removal, the same for every particle whatever the weather; the lifetime and its
-    justification are in risk.py. lifetime_hours None uses REMOVAL_LIFETIME_HOURS, inf disables
+    justification are in smoke.py. lifetime_hours None uses REMOVAL_LIFETIME_HOURS, inf disables
     removal. The particles themselves keep moving; only the smoke they carry shrinks.
     """
     tau = config.REMOVAL_LIFETIME_HOURS if lifetime_hours is None else lifetime_hours
@@ -676,7 +676,7 @@ def select_for_export(
     1. Near-zone trajectories: those passing within near_km of a zone's edge. Zones take turns
        (round robin), so a zone touched only by a small fire still gets its share. Each zone
        offers its candidates in a random order weighted by how much smoke their cluster brings
-       to that zone (contribution[z, c], from the risk step), so the lines drawn to a city
+       to that zone (contribution[z, c], from the smoke step), so the lines drawn to a city
        match its source breakdown; without contribution, by trajectory weight. This pass takes
        at most priority_share of the cap, so the map keeps some regional context even when
        many trajectories pass near zones.

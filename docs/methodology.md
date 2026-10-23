@@ -268,6 +268,15 @@ t0 18:00 UTC, 15,972 hotspots, 408 clusters, 870,160 particles (282,640 released
 
 Where CAMS shows unhealthy air, Hazier finds smoke from the fires already present, and names Jambi and South Sumatra (Kalimantan for Kuching) as the origin. Kuantan and Ipoh are `hazier_only`: Hazier expects the Jambi plume to reach them within hours while CAMS keeps them in the good or moderate band, though CAMS also shows Kuantan worsening. Whether the plume stays aloft, is diluted below what CAMS resolves, or is overestimated by Hazier is a question for phase 2 verification against APIMS.
 
+## Pipeline run and fallback
+
+`python -m hazier` runs everything in order: FIRMS, winds, CAMS (zones and map grid), the smoke model, then the CAMS fields of each zone. The resulting forecast is checked against the schema (types, finite numbers, UTC timestamps, matching lengths, shares summing to 1) and written atomically, so a crash never leaves a half-written file.
+
+- **A source fails:** the run goes on with what is available and `source_status` says so. Without CAMS the forecast is still written, without CAMS levels or map layer; the smoke timing is unaffected.
+- **No usable forecast:** without FIRMS or winds there is no smoke forecast. Nothing is written and the run exits with code 1. A forecast that fails validation is not written either (code 2). On GitHub, a failing run stops before the deploy step, and GitHub Pages keeps serving the last published `forecast.json`. This is the simplest fallback: no previous file needs to be downloaded. The web should mark a forecast as stale when `generated_at` is more than about 9 h old (one missed run plus margin).
+- **History:** every run, including failed ones, appends one line to `data/history/runs.csv`: run time, t0, outcome, source states, hotspot and cluster counts, and per zone the CAMS 24 h mean at t0, the smoke ETA and the main source region. About 180 bytes a line, so roughly 260 KB a year at 4 runs a day. The workflow commits it, which keeps the scheduled workflow alive, and it feeds phase 2 verification. The `last_ok` time of a failed source comes from it.
+- **Size:** on 23 October 2026 the forecast was 707 KB (117 KB gzipped): trajectories 343 KB, the 1,500 strongest hotspots 238 KB, clusters 67 KB, CAMS grid 36 KB, zones 22 KB.
+
 ## Verification
 
 ## Limitations

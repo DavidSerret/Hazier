@@ -431,7 +431,7 @@ def test_selection_shares_the_priority_budget_between_zones():
 
 
 def test_selection_follows_each_zone_s_source_breakdown():
-    # Two fires below Singapore. By FRP the first dominates, but the risk step says nearly all
+    # Two fires below Singapore. By FRP the first dominates, but the smoke step says nearly all
     # of Singapore's smoke comes from the second: its lines must come first.
     clusters = [cluster(0, 0.4, 103.6, 5000.0, "A"), cluster(1, 0.5, 104.0, 50.0, "B")]
     tracers = tracers_for(clusters, uniform(0.0, 3.0))
