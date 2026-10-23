@@ -18,6 +18,7 @@ web/dist/
 /forecast.json
 pipeline/forecast.json
 pipeline/.cache/
+pipeline/output/
 web/public/forecast.json
 
 # Environment and editors

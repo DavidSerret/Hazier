@@ -343,3 +343,51 @@ def test_corrupt_cache_file_is_ignored(api, tmp_path):
     cache_file.write_bytes(b"not an npz")
     result = fetch(tmp_path)
     assert not result.from_cache and result.status.state == "ok"
+
+
+# --- sampling (bilinear in space, linear in time) --------------------------------------
+
+
+def small_field(fn):
+    lats, lons = np.arange(0.0, 4.0), np.arange(100.0, 105.0)
+    hours = np.arange(0.0, 4.0)
+    hh, la, lo = np.meshgrid(hours, lats, lons, indexing="ij")
+    t = np.datetime64("2026-09-14T00:00", "s") + (hours * 3600).astype("timedelta64[s]")
+    u = fn(la, lo, hh)
+    return winds.WindField("m", None, 850, t, lats, lons, u, 2 * u)
+
+
+def test_sample_is_exact_on_a_multilinear_field():
+    def fn(la, lo, h):
+        return 1 + 2 * la - 0.5 * lo + 3 * h + 0.25 * la * h
+
+    f = small_field(fn)
+    lat = np.array([0.3, 1.75, 3.0, 2.2])
+    lon = np.array([100.1, 102.5, 104.0, 103.9])
+    hour = np.array([0.5, 2.25, 3.0, 1.0])
+    u, v = f.sample(lat, lon, hour)
+    assert np.allclose(u, fn(lat, lon, hour)) and np.allclose(v, 2 * fn(lat, lon, hour))
+
+
+def test_sample_outside_grid_or_time_is_nan():
+    f = small_field(lambda la, lo, h: np.ones(la.shape))
+    u, _ = f.sample([-0.1, 1.0, 1.0, np.nan], [101.0, 105.1, 101.0, 101.0], [1.0, 1.0, 3.5, 1.0])
+    assert np.isnan(u).all()
+
+
+def test_sample_missing_corner_gives_nan_only_when_it_counts():
+    def fn(la, lo, h):
+        return np.where((la == 1) & (lo == 101), np.nan, 1.0)
+
+    f = small_field(fn)
+    u, _ = f.sample([1.5, 0.0, 1.0, 2.0], [101.5, 101.0, 102.0, 101.0], 1.0)
+    # inside a cell touching the gap: NaN; exactly on other nodes or lines: zero weight, fine
+    assert np.isnan(u[0])
+    assert np.allclose(u[1:], 1.0)
+
+
+def test_at_matches_sample():
+    f = small_field(lambda la, lo, h: la * lo + h)
+    u_at, _ = f.at(1.3, 102.6)
+    u_s, _ = f.sample(1.3, 102.6, f.hours)
+    assert np.array_equal(u_at, u_s)

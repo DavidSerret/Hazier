@@ -115,26 +115,116 @@ class WindField:
         """Hours since the first time step, shape (T,)."""
         return (self.times - self.times[0]) / np.timedelta64(1, "h")
 
-    def at(self, lat: float, lon: float) -> tuple[np.ndarray, np.ndarray]:
-        """(u, v) time series at a point, bilinear in space. NaN if a corner is missing."""
-        dy = self.lats[1] - self.lats[0]
-        dx = self.lons[1] - self.lons[0]
-        fy, fx = (lat - self.lats[0]) / dy, (lon - self.lons[0]) / dx
-        if not (0 <= fy <= len(self.lats) - 1 and 0 <= fx <= len(self.lons) - 1):
-            raise ValueError(f"({lat}, {lon}) is outside the wind grid")
-        y0 = min(int(fy), len(self.lats) - 2)
-        x0 = min(int(fx), len(self.lons) - 2)
+    def contains(self, lat, lon) -> np.ndarray:
+        """True where (lat, lon) lies inside the grid, edges included. NaN gives False."""
+        lat, lon = np.asarray(lat, dtype=float), np.asarray(lon, dtype=float)
+        return (
+            (lat >= self.lats[0])
+            & (lat <= self.lats[-1])
+            & (lon >= self.lons[0])
+            & (lon <= self.lons[-1])
+        )
+
+    def sample(self, lat, lon, hour) -> tuple[np.ndarray, np.ndarray]:
+        """(u, v) at arbitrary points and times: bilinear in space, linear in time.
+
+        lat, lon and hour (hours since times[0]) broadcast against each other. The result is
+        NaN where the point is outside the grid or the time range, and where any surrounding
+        grid value that contributes (non-zero weight) is missing. A missing value is never
+        silently replaced. A corner with zero weight is ignored, so a point exactly on a grid
+        line or at a whole hour does not depend on the next row, column or hour.
+        Axes must be evenly spaced, which they are for the Open-Meteo grid and hourly series.
+
+        Done in two linear steps, which is the same as trilinear interpolation because linear
+        interpolations commute: first the grid is interpolated to each requested hour (a small
+        2-D slice), then each point is interpolated bilinearly on that slice. The integrator
+        asks for all particles at one time, so it pays for one slice and 4 corners per point.
+        """
+        if np.ndim(hour) == 0:
+            return self._sample_at_hour(
+                np.asarray(lat, dtype=float), np.asarray(lon, dtype=float), float(hour)
+            )
+        lat, lon, hour = np.broadcast_arrays(
+            np.asarray(lat, dtype=float), np.asarray(lon, dtype=float), np.asarray(hour, float)
+        )
+        u_out = np.full(lat.shape, np.nan)
+        v_out = np.full(lat.shape, np.nan)
+        for h in np.unique(hour[~np.isnan(hour)]):
+            at_h = hour == h
+            u_out[at_h], v_out[at_h] = self._sample_at_hour(lat[at_h], lon[at_h], float(h))
+        return u_out, v_out
+
+    def _slice(self, hour: float) -> tuple[np.ndarray, np.ndarray] | None:
+        """The (u, v) grids linearly interpolated to one hour; None outside the time range."""
+        hours = self.hours
+        nt = len(hours)
+        ft = (hour - hours[0]) / (hours[1] - hours[0])
+        if not 0 <= ft <= nt - 1:
+            return None
+        t0 = min(int(ft), nt - 2)
+        wt = ft - t0
+        # A whole hour uses that hour alone, so a gap in the next hour does not leak in.
+        if wt == 0:
+            return self.u[t0], self.v[t0]
+        if wt == 1:
+            return self.u[t0 + 1], self.v[t0 + 1]
+        return (
+            (1 - wt) * self.u[t0] + wt * self.u[t0 + 1],
+            (1 - wt) * self.v[t0] + wt * self.v[t0 + 1],
+        )
+
+    def _sample_at_hour(
+        self, lat: np.ndarray, lon: np.ndarray, hour: float
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Bilinear interpolation of many points on the grid at one hour."""
+        lat, lon = np.broadcast_arrays(lat, lon)
+        u_out = np.full(lat.shape, np.nan)
+        v_out = np.full(lat.shape, np.nan)
+        grids = self._slice(hour)
+        if grids is None:
+            return u_out, v_out
+
+        ny, nx = len(self.lats), len(self.lons)
+        # Fractional grid indices. NaN inputs fail every comparison below and are skipped.
+        fy = (lat - self.lats[0]) / (self.lats[1] - self.lats[0])
+        fx = (lon - self.lons[0]) / (self.lons[1] - self.lons[0])
+        ok = (fy >= 0) & (fy <= ny - 1) & (fx >= 0) & (fx <= nx - 1)
+        if not ok.any():
+            return u_out, v_out
+        fy, fx = fy[ok], fx[ok]
+        # Lower corner index; a point exactly on the last row uses the last cell with weight 1.
+        y0 = np.minimum(fy.astype(int), ny - 2)
+        x0 = np.minimum(fx.astype(int), nx - 2)
         wy, wx = fy - y0, fx - x0
 
-        def interp(a: np.ndarray) -> np.ndarray:
-            return (
-                a[:, y0, x0] * (1 - wy) * (1 - wx)
-                + a[:, y0, x0 + 1] * (1 - wy) * wx
-                + a[:, y0 + 1, x0] * wy * (1 - wx)
-                + a[:, y0 + 1, x0 + 1] * wy * wx
-            )
+        # Corners gathered from the flattened grids with one index shared by u and v.
+        u_flat, v_flat = grids[0].ravel(), grids[1].ravel()
+        base = y0 * nx + x0
+        # Only a grid with gaps needs the zero-weight guard (NaN * 0 would still be NaN).
+        guard = bool(np.isnan(u_flat).any() or np.isnan(v_flat).any())
+        u_acc = np.zeros(fy.shape)
+        v_acc = np.zeros(fy.shape)
+        for dy, w_y in ((0, 1 - wy), (1, wy)):
+            for dx, w_x in ((0, 1 - wx), (1, wx)):
+                w = w_y * w_x
+                corner = base + (dy * nx + dx)
+                uc, vc = u_flat.take(corner), v_flat.take(corner)  # copies
+                if guard:
+                    unused = w == 0
+                    uc[unused] = 0.0
+                    vc[unused] = 0.0
+                u_acc += uc * w
+                v_acc += vc * w
+        u_out[ok] = u_acc
+        v_out[ok] = v_acc
+        return u_out, v_out
 
-        return interp(self.u), interp(self.v)
+    def at(self, lat: float, lon: float) -> tuple[np.ndarray, np.ndarray]:
+        """(u, v) time series at a point, bilinear in space. NaN if a corner is missing."""
+        if not self.contains(lat, lon):
+            raise ValueError(f"({lat}, {lon}) is outside the wind grid")
+        hours = self.hours
+        return self.sample(np.full(hours.shape, lat), np.full(hours.shape, lon), hours)
 
 
 @dataclass

@@ -17,10 +17,14 @@ dependencies = [
 dev = [
     "pytest",
     "ruff",
+    "matplotlib",  # debug plots only, never imported by the pipeline itself
 ]
 
 [tool.setuptools.packages.find]
 include = ["hazier*"]
+
+[tool.setuptools.package-data]
+hazier = ["data/*.geojson"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

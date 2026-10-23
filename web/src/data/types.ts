@@ -30,12 +30,23 @@ export interface Hotspot {
   region: string;
 }
 
+export interface SourceCluster {
+  id: number;
+  lat: number;
+  lon: number;
+  frp_mw: number;
+  hotspot_count: number;
+  latest_at: string;
+  region: string;
+}
+
 export interface Trajectory {
   id: number;
-  hotspot_id: number;
-  source_region: string;
+  cluster_id: number;
+  weight: number;
   path: [number, number][];
   hours: number[];
+  source_region: string;
 }
 
 export interface SourceShare {
@@ -45,7 +56,7 @@ export interface SourceShare {
 
 export interface RiskPoint {
   hour: number;
-  index: number;
+  index: number; // smoke index, >= 0 and unbounded
   level: RiskLevel;
 }
 
@@ -61,9 +72,13 @@ export interface ZoneForecast {
   lat: number;
   lon: number;
   radius_km: number;
-  risk_index: number;
+  risk_index: number; // peak smoke index
   risk_level: RiskLevel;
+  peak_hour: number | null;
   eta_hours: number | null;
+  // Both null when eta_hours is null; eta_latest_hours null alone means "possibly after 72 h".
+  eta_earliest_hours: number | null;
+  eta_latest_hours: number | null;
   sources: SourceShare[];
   risk_series: RiskPoint[];
   cams_pm25: Pm25Point[];
@@ -84,8 +99,10 @@ export interface Forecast {
   generated_at: string;
   horizon_hours: number;
   hotspots: Hotspot[];
+  clusters: SourceCluster[];
   trajectories: Trajectory[];
   zones: ZoneForecast[];
+  risk_thresholds: Record<RiskLevel, number>; // lower bound of the smoke index per level
   source_status: SourceStatus[];
   schema_version: number;
 }

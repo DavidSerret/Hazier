@@ -41,6 +41,13 @@ copy .env.example .env        # then put your key in .env
 .venv\Scripts\python.exe -m hazier.sources.firms
 ```
 
+Other debug commands (from `pipeline/`):
+
+```
+.venv\Scripts\python.exe -m hazier.sources.winds          # 850 hPa winds, cached per model run
+.venv\Scripts\python.exe -m hazier.model.risk             # full model: zone risk table, saves output/trajectories.png
+```
+
 Web (uses `public/forecast.sample.json` until the pipeline produces real data):
 
 ```
