@@ -18,14 +18,18 @@ from typing import Literal
 
 SCHEMA_VERSION = 1
 
-# Our own trajectory risk levels.
-RiskLevel = Literal["low", "moderate", "high", "very_high"]
-
-# Malaysian API categories, used only for CAMS PM2.5 concentrations.
+# Malaysian API categories, used for CAMS PM2.5 concentrations: the air quality shown to users.
 Pm25Category = Literal["good", "moderate", "unhealthy", "very_unhealthy", "hazardous"]
+
+# CAMS over the next 24 h compared with the last 24 h, for the zone card.
+Trend = Literal["improving", "stable", "worsening"]
 
 SourceName = Literal["firms", "winds", "cams", "apims"]
 SourceState = Literal["ok", "degraded", "failed"]
+
+# Whether Hazier expects smoke from the detected fires (its smoke reaches the arrival threshold)
+# and whether CAMS expects elevated PM2.5, over the window. For verification, not for display.
+AgreementFlag = Literal["both_elevated", "hazier_only", "cams_only", "both_low"]
 
 
 @dataclass
@@ -51,6 +55,9 @@ class SourceCluster:
     hotspot_count: int
     latest_at: str  # UTC of the most recent detection
     region: str = ""  # source region label; filled by the attribution step
+    # UTC of the earliest detection in the 48 h lookback: smoke is released from then on.
+    # Empty when unknown, and then the cluster only releases from t0.
+    first_at: str = ""
 
 
 @dataclass
@@ -70,37 +77,43 @@ class SourceShare:
 
 
 @dataclass
-class RiskPoint:
-    hour: float  # hours since generated_at
-    index: float  # smoke index, >= 0 and unbounded (see hazier/model/risk.py)
-    level: RiskLevel
-
-
-@dataclass
 class Pm25Point:
     time: str  # UTC
-    value_ugm3: float  # CAMS PM2.5
-    category: Pm25Category  # Malaysian API category of the concentration
+    value_ugm3: float  # CAMS PM2.5, hourly value at the zone centre
+    # Mean over the trailing Pm25Baseline.averaging_hours hours (the hour and those before it),
+    # the value the category is based on. Equal to value_ugm3 when the averaging is 1 hour.
+    basis_ugm3: float
+    category: Pm25Category  # Malaysian API category of basis_ugm3
 
 
 @dataclass
 class ZoneForecast:
+    """One zone: air quality from CAMS; smoke timing and origin from Hazier.
+
+    The level shown to users is the CAMS category (cams_now, cams_peak). Hazier does not
+    publish a level of its own: its smoke index is too rough for "how much PM2.5" and is only
+    used internally for the arrival time and the attribution below.
+    """
+
     id: str
     name: str
     lat: float
     lon: float
     radius_km: float
-    risk_index: float  # peak smoke index over the horizon
-    risk_level: RiskLevel  # level of that peak
-    peak_hour: float | None  # hour of the peak, null if no smoke reaches the zone
-    eta_hours: float | None  # first hour the index reaches "moderate", null if it never does
-    # Uncertainty of the ETA from the dispersion ensemble (10th and 90th percentiles). Both
-    # null when eta_hours is null; eta_latest_hours null alone means "possibly after 72 h".
-    eta_earliest_hours: float | None
-    eta_latest_hours: float | None
-    sources: list[SourceShare]  # source regions of the smoke reaching the zone, largest first
-    risk_series: list[RiskPoint]  # hourly, lets the timeline update zone risk when scrubbing
-    cams_pm25: list[Pm25Point]  # CAMS baseline series
+    # Hazier: when smoke from the fires detected in the last 48 h reaches the zone. 0 means it
+    # is already there at t0; null means not within the horizon. The range is the time the
+    # smoke takes to build up around the arrival threshold (see risk.py); earliest and latest
+    # are null with the ETA, and latest alone is null for "possibly after 72 h".
+    smoke_eta_hours: float | None
+    smoke_eta_earliest_hours: float | None
+    smoke_eta_latest_hours: float | None
+    smoke_sources: list[SourceShare]  # where the smoke reaching the zone comes from, largest first
+    # CAMS, filled by the CAMS step; empty / null when CAMS has no data for the zone.
+    cams_now: Pm25Point | None = None  # at t0: the level to show on the card
+    cams_peak: Pm25Point | None = None  # the hour of the highest category basis in the window
+    cams_trend: Trend | None = None  # next 24 h against the last 24 h
+    cams_pm25: list[Pm25Point] = field(default_factory=list)  # every few hours, see Pm25Baseline
+    agreement: AgreementFlag | None = None  # null when there is nothing to compare with
 
 
 @dataclass
@@ -122,6 +135,63 @@ class SourceStatus:
 
 
 @dataclass
+class Attribution:
+    """Credit that must be shown wherever the data is shown."""
+
+    name: str
+    text: str
+    url: str
+
+
+@dataclass
+class Pm25Baseline:
+    """How to read cams_pm25: where it comes from and how the categories were derived."""
+
+    source: str  # for example "CAMS global via Open-Meteo"
+    resolution_km: float  # about 45: one value stands for a cell much larger than a zone
+    step_hours: int  # spacing of the points in cams_pm25
+    averaging_hours: int  # trailing mean behind each category
+    averaging_verified: bool  # whether that averaging period is confirmed as the DOE's
+    # False while the Malaysian API breakpoints are not checked against the official DOE
+    # document: the web must then label the categories as provisional.
+    categories_verified: bool
+    category_upper_bounds: dict[str, float | None]  # ug/m3 upper bound per category, null = open
+    # Agreement flag rule: CAMS is "elevated" from this category on (Hazier: smoke arrives).
+    cams_elevated_category: Pm25Category
+
+
+@dataclass
+class Pm25Grid:
+    """CAMS PM2.5 on the wind grid, for the map colour layer, quantised to stay small.
+
+    values holds one integer per (frame, lat, lon), row-major: frame first, then latitude
+    (south to north), then longitude (west to east). The concentration is value * quantum_ugm3;
+    null marks a missing value. Each value is the trailing averaging_hours mean, the same basis
+    as the zone categories, so the map and the cards use the same colours for the same air.
+    """
+
+    lats: list[float]  # ascending
+    lons: list[float]  # ascending
+    hours: list[float]  # hours since generated_at of each frame
+    averaging_hours: int
+    quantum_ugm3: float
+    values: list[int | None]
+
+
+@dataclass
+class SmokeModel:
+    """How Hazier's smoke timing and attribution were made. Not an air quality measure."""
+
+    wind_model: str  # for example "ecmwf_ifs025"
+    level_hpa: int
+    lookback_hours: int  # fires detected in this window are sources
+    past_hours: int  # smoke emitted up to this long before t0 is carried to t0
+    removal_lifetime_hours: float  # first-order removal, weights decay as exp(-age / lifetime)
+    # Smoke index (internal units) at which smoke counts as arrived. Provisional.
+    arrival_threshold: float
+
+
+@dataclass
 class Forecast:
     generated_at: str  # UTC
     horizon_hours: int
@@ -129,9 +199,11 @@ class Forecast:
     clusters: list[SourceCluster]
     trajectories: list[Trajectory]
     zones: list[ZoneForecast]
-    # Lower bound of the smoke index for each level, so the web can draw the bands.
-    risk_thresholds: dict[str, float]
+    smoke_model: SmokeModel
     source_status: list[SourceStatus] = field(default_factory=list)
+    attributions: list[Attribution] = field(default_factory=list)
+    pm25_baseline: Pm25Baseline | None = None  # null when the CAMS step produced nothing
+    pm25_grid: Pm25Grid | None = None  # null when the CAMS grid could not be fetched
     schema_version: int = SCHEMA_VERSION
 
     def to_dict(self) -> dict:

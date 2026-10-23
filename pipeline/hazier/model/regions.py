@@ -121,3 +121,30 @@ def label_clusters(clusters: list[SourceCluster]) -> list[SourceCluster]:
         return []
     names = region_names([c.lat for c in clusters], [c.lon for c in clusters])
     return [replace(c, region=name) for c, name in zip(clusters, names, strict=True)]
+
+
+@dataclass
+class OffshoreSplit:
+    kept: list[SourceCluster]  # renumbered so that id == list index, strongest first
+    dropped: list[SourceCluster]  # original ids kept, for logging
+    dropped_frp_mw: float
+
+
+def drop_offshore(clusters: list[SourceCluster]) -> OffshoreSplit:
+    """Remove labelled clusters that are not on land.
+
+    A cluster is offshore when its centroid is outside every land polygon and farther than
+    SNAP_KM from the nearest one, i.e. its region is OTHER. Such clusters are almost always
+    gas flares on offshore oil and gas fields (for example the one near 10.4 N 108.2 E, off
+    southern Vietnam), not vegetation fires. Fires on the shore, whose centroid falls just on
+    the water, are within SNAP_KM of land and are kept.
+
+    The input must already be labelled (see label_clusters).
+    """
+    kept = [c for c in clusters if c.region != OTHER]
+    dropped = [c for c in clusters if c.region == OTHER]
+    return OffshoreSplit(
+        kept=[replace(c, id=i) for i, c in enumerate(kept)],
+        dropped=dropped,
+        dropped_frp_mw=float(sum(c.frp_mw for c in dropped)),
+    )

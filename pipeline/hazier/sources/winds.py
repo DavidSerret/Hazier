@@ -1,8 +1,10 @@
-"""Open-Meteo forecast API: winds at 850 hPa on a 1 degree grid, 72 h horizon.
+"""Open-Meteo forecast API: winds at 850 hPa on a 1 degree grid, past 48 h and next 72 h.
 
 The output is a WindField: u and v arrays shaped (time, lat, lon) plus the three axes, ready
-for the trajectory model. Times are UTC, hourly, starting at the current hour and running
-HORIZON_HOURS ahead (73 steps for 72 h).
+for the trajectory model. Times are UTC and hourly. They start WIND_PAST_HOURS (48 h) before
+t0, the current hour, and run HORIZON_HOURS (72 h) after it: 121 steps. The past part carries
+the smoke emitted before t0 up to t0. Open-Meteo builds it from its archive of recent runs of
+the same model (past_days), so it is close to an analysis rather than a forecast.
 
 Wind components
 ---------------
@@ -109,11 +111,16 @@ class WindField:
     lons: np.ndarray  # degrees east, ascending, shape (X,)
     u: np.ndarray  # eastward wind m/s, shape (T, Y, X), NaN where missing
     v: np.ndarray  # northward wind m/s, shape (T, Y, X), NaN where missing
+    t0_index: int = 0  # index of t0, the start of the forecast; earlier times are the past
+
+    @property
+    def t0(self) -> np.datetime64:
+        return self.times[self.t0_index]
 
     @property
     def hours(self) -> np.ndarray:
-        """Hours since the first time step, shape (T,)."""
-        return (self.times - self.times[0]) / np.timedelta64(1, "h")
+        """Hours since t0, shape (T,): negative in the past, 0 at t0."""
+        return (self.times - self.times[self.t0_index]) / np.timedelta64(1, "h")
 
     def contains(self, lat, lon) -> np.ndarray:
         """True where (lat, lon) lies inside the grid, edges included. NaN gives False."""
@@ -128,7 +135,7 @@ class WindField:
     def sample(self, lat, lon, hour) -> tuple[np.ndarray, np.ndarray]:
         """(u, v) at arbitrary points and times: bilinear in space, linear in time.
 
-        lat, lon and hour (hours since times[0]) broadcast against each other. The result is
+        lat, lon and hour (hours since t0) broadcast against each other. The result is
         NaN where the point is outside the grid or the time range, and where any surrounding
         grid value that contributes (non-zero weight) is missing. A missing value is never
         silently replaced. A corner with zero weight is ignored, so a point exactly on a grid
@@ -300,6 +307,7 @@ def _fetch_batch(points: list[tuple[float, float]], counter: _CallCounter) -> li
         "wind_speed_unit": "ms",
         "models": config.WIND_MODEL,
         "forecast_days": config.WIND_FORECAST_DAYS,
+        "past_days": config.WIND_PAST_DAYS,
         "timezone": "GMT",
         "timeformat": "unixtime",
     }
@@ -371,13 +379,18 @@ def _assemble(
 
 def _window(
     axis: np.ndarray, u: np.ndarray, v: np.ndarray, now: datetime
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Cut the hourly series to [current hour, current hour + horizon], padding with NaN."""
-    start = int(_floor_hour(now).timestamp())
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, int]:
+    """Cut the hourly series to [t0 - past, t0 + horizon], padding the end with NaN.
+
+    t0 is the current hour. Returns times, u, v and the index of t0.
+    """
+    t0 = int(_floor_hour(now).timestamp())
+    past_steps = config.WIND_PAST_HOURS // config.STEP_HOURS
+    start = t0 - config.WIND_PAST_HOURS * 3600
     hits = np.flatnonzero(axis == start)
-    if hits.size == 0:
-        raise WindsError("the forecast time axis does not contain the current hour")
-    steps = config.HORIZON_HOURS // config.STEP_HOURS + 1
+    if hits.size == 0 or not (axis == t0).any():
+        raise WindsError("the time axis does not contain the current hour and the past 48 h")
+    steps = past_steps + config.HORIZON_HOURS // config.STEP_HOURS + 1
     first = int(hits[0])
     sel = slice(first, first + steps)
     times = start + np.arange(steps, dtype="int64") * config.STEP_HOURS * 3600
@@ -385,7 +398,7 @@ def _window(
     vw = np.full_like(uw, np.nan)
     got = u[sel].shape[0]
     uw[:got], vw[:got] = u[sel], v[sel]
-    return times.astype("datetime64[s]"), uw, vw
+    return times.astype("datetime64[s]"), uw, vw, past_steps
 
 
 # --- Cache ---------------------------------------------------------------------------------
@@ -394,7 +407,13 @@ def _window(
 def _cache_path(cache_dir: Path, run_init: datetime, now: datetime) -> Path:
     lats, lons = grid_axes()
     spec = json.dumps(
-        [lats.tolist(), lons.tolist(), config.PRESSURE_LEVEL_HPA, config.WIND_FORECAST_DAYS]
+        [
+            lats.tolist(),
+            lons.tolist(),
+            config.PRESSURE_LEVEL_HPA,
+            config.WIND_FORECAST_DAYS,
+            config.WIND_PAST_DAYS,
+        ]
     )
     digest = hashlib.sha1(spec.encode()).hexdigest()[:8]
     # The hourly axis starts at 00:00 UTC of the request day, so the day is part of the key.
@@ -481,7 +500,7 @@ def _fetch_winds(now: datetime, use_cache: bool, cache_dir: Path) -> WindsResult
             return result
         axis, u, v = assembled
 
-    times, uw, vw = _window(axis, u, v, now)
+    times, uw, vw, t0_index = _window(axis, u, v, now)
     missing = int(np.isnan(uw).any(axis=0).sum())
     total = len(points)
     result.missing_points = missing
@@ -499,6 +518,7 @@ def _fetch_winds(now: datetime, use_cache: bool, cache_dir: Path) -> WindsResult
         lons=lons,
         u=uw,
         v=vw,
+        t0_index=t0_index,
     )
     if missing:
         detail = f"{missing} of {total} grid points missing"
@@ -528,7 +548,7 @@ def _report(result: WindsResult, now: datetime) -> None:
         t, y, x = f.u.shape
         print(f"grid: {y} lat x {x} lon = {y * x} points, {t} hourly steps")
         print(f"lat {f.lats[0]:g} to {f.lats[-1]:g}, lon {f.lons[0]:g} to {f.lons[-1]:g}")
-        print(f"time (UTC): {f.times[0]} to {f.times[-1]}")
+        print(f"time (UTC): {f.times[0]} to {f.times[-1]}, t0 {f.t0} (index {f.t0_index})")
     source = "cache" if result.from_cache else "API"
     print(
         f"API calls this run: {result.calls_used} in {result.batches} requests ({source}), "
@@ -543,7 +563,7 @@ def _report(result: WindsResult, now: datetime) -> None:
         speed, direction = uv_to_speed_dir(u, v)
         print(f"\n{name} ({lat:g}N, {lon:g}E), next 24 h, bilinear from the 1 degree grid")
         print(f"{'UTC':<17}{'MYT':<7}{'speed m/s':>10}{'from deg':>10}{'u':>8}{'v':>8}")
-        for i in range(0, 25, 3):
+        for i in range(f.t0_index, f.t0_index + 25, 3):
             utc = f.times[i].astype("datetime64[m]").astype(datetime)
             myt = utc + timedelta(hours=8)
             print(

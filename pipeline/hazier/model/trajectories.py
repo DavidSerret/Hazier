@@ -4,13 +4,19 @@ This is the physics core. It answers one question: if the fires seen in the last
 burning, where does their smoke travel over the next 72 h? Risk, ETA and attribution per zone
 are computed in risk.py from what this module produces.
 
+Time runs from 48 h before t0 (the current hour) to 72 h after it. Smoke emitted since each
+fire was first seen is carried with the past winds up to t0, so the smoke already in the air
+at t0 is part of the forecast; from t0 on the fires are assumed to keep burning.
+
 Steps
 -----
 1. cluster_hotspots: bin the hotspots on a 0.25 degree grid, one cluster per occupied cell.
-2. release_particles: every cluster releases 20 particles every hour (continuous emission).
+2. release_particles: every cluster releases 20 particles every hour, from its first detection
+   in the last 48 h until the end of the forecast (continuous emission).
 3. advect: move every particle with the 850 hPa wind (Heun, RK2) plus a random walk for
    horizontal dispersion. Observers gather what later steps need while the particles move,
-   so the full path of every particle is never stored.
+   so the full path of every particle is never stored. Particles go in batches so memory
+   stays flat.
 4. select_for_export: a light subset of display trajectories for forecast.json.
 
 Equations of motion
@@ -71,6 +77,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from dataclasses import asdict, dataclass, replace
 from enum import IntEnum
 from typing import Protocol
@@ -116,7 +123,8 @@ def cluster_hotspots(
     - frp_mw, the summed FRP of every detection in the last 48 h. A fire seen on several
       overpasses counts each time, so this mixes intensity and persistence. It is used as a
       proxy for emission strength (see release_particles), not as a physical emission rate;
-    - hotspot_count and latest_at, the time of the most recent detection.
+    - hotspot_count, and first_at and latest_at, the times of the earliest and the most recent
+      detection.
 
     Clusters below min_frp_mw are dropped. The rest are ranked by frp_mw (strongest first,
     ties broken by cell) and numbered in that order.
@@ -146,6 +154,8 @@ def cluster_hotspots(
     c_lon = np.bincount(member, weights=w * lon, minlength=n) / w_sum
     latest = np.full(n, np.iinfo(np.int64).min)
     np.maximum.at(latest, member, acquired.astype(np.int64))
+    earliest = np.full(n, np.iinfo(np.int64).max)
+    np.minimum.at(earliest, member, acquired.astype(np.int64))
 
     keep = frp_sum >= min_frp
     order = np.lexsort((keys[:, 1], keys[:, 0], -frp_sum))  # last key is the primary one
@@ -158,6 +168,7 @@ def cluster_hotspots(
             frp_mw=float(frp_sum[k]),
             hotspot_count=int(count[k]),
             latest_at=f"{np.datetime64(int(latest[k]), 's')}Z",
+            first_at=f"{np.datetime64(int(earliest[k]), 's')}Z",
         )
         for i, k in enumerate(order)
     ]
@@ -186,13 +197,23 @@ def release_particles(
     particles_per_release: int | None = None,
     interval_hours: int | None = None,
     horizon_hours: int | None = None,
+    t0: np.datetime64 | None = None,
+    earliest_hour: float | None = None,
 ) -> Particles:
-    """Particles released by every cluster at t0 and every interval_hours until the horizon.
+    """Particles released by every cluster every interval_hours until the horizon.
 
-    Fires emit continuously; frequent releases turn that into a train of puffs. With the
-    defaults (hourly, horizon 72 h) the release hours are 0, 1, ..., 71: nothing is released at
-    72 h because it would have no time to move. Each release holds particles_per_release
-    particles that start together at the cluster centroid and spread apart through dispersion.
+    Fires emit continuously; frequent releases turn that into a train of puffs. Nothing is
+    released at the horizon itself because it would have no time to move. Each release holds
+    particles_per_release particles that start together at the cluster centroid and spread
+    apart through dispersion.
+
+    When releases start. Without t0, every cluster starts at t0 (hour 0). With t0 (the forecast
+    start, as a UTC datetime64), each cluster starts at the first whole interval at or after its
+    earliest detection (first_at): the fire is taken to have been burning since it was first
+    seen in the lookback, so its smoke is already in the air at t0. A cluster first seen
+    between t0 and now still starts at t0. Releases never start before earliest_hour (default
+    -LOOKBACK_HOURS; pass the start of the wind field), and a cluster without first_at starts
+    at t0. With the defaults a cluster seen 30 h before t0 releases at -30, -29, ..., 71.
 
     Weights. Under the persistent-fire assumption each cluster emits at a constant rate,
     proportional to its summed FRP S over the 48 h lookback. That rate is taken as S / 48 h,
@@ -200,25 +221,39 @@ def release_particles(
 
         weight = S / LOOKBACK_HOURS * interval_hours / particles_per_release
 
-    The unit (an "emission unit") is the smoke emitted in one hour by a source averaging 1 MW
-    of detected FRP per hour of observation. Absolute rather than relative weights matter: the
-    smoke index of a zone must grow with the size of the fires, not with their share of the
-    day's total, or a single small fire on a quiet day would look like an episode.
+    The same rate applies before and after t0. The unit (an "emission unit") is the smoke
+    emitted in one hour by a source averaging 1 MW of detected FRP per hour of observation.
+    Absolute rather than relative weights matter: the smoke index of a zone must grow with the
+    size of the fires, not with their share of the day's total, or a single small fire on a
+    quiet day would look like an episode.
 
     Particles are ordered by cluster (strongest first), then release hour.
     """
     n_per = config.PARTICLES_PER_RELEASE if particles_per_release is None else particles_per_release
     interval = config.RELEASE_INTERVAL_HOURS if interval_hours is None else interval_hours
     horizon = config.HORIZON_HOURS if horizon_hours is None else horizon_hours
-    hours = np.arange(0, horizon, interval, dtype=float)
-    n_clusters, n_releases = len(clusters), len(hours)
+    floor_hour = -config.FIRMS_LOOKBACK_HOURS if earliest_hour is None else earliest_hour
+    first_allowed = math.ceil(floor_hour / interval) * interval
+
+    starts = []
+    for c in clusters:
+        start = 0
+        if t0 is not None and c.first_at:
+            seen = np.datetime64(c.first_at.rstrip("Z"), "s") - np.datetime64(t0, "s")
+            offset = float(seen / np.timedelta64(1, "h"))
+            start = min(math.ceil(offset / interval) * interval, 0)
+        starts.append(max(start, first_allowed))
+    release_hours = [np.arange(s0, horizon, interval, dtype=float) for s0 in starts]
+    counts = np.array([len(h) for h in release_hours], dtype=int)
 
     strength = np.array([c.frp_mw for c in clusters], dtype=float)
     per_particle = strength / config.FIRMS_LOOKBACK_HOURS * interval / n_per
-    cluster_index = np.repeat(np.arange(n_clusters), n_releases * n_per)
+    per_release_cluster = np.repeat(np.arange(len(clusters)), counts)
+    cluster_index = np.repeat(per_release_cluster, n_per)
+    hours = np.concatenate(release_hours) if release_hours else np.array([], dtype=float)
     return Particles(
         cluster_index=cluster_index,
-        release_hour=np.tile(np.repeat(hours, n_per), n_clusters),
+        release_hour=np.repeat(hours, n_per),
         lat0=np.array([c.lat for c in clusters], dtype=float)[cluster_index],
         lon0=np.array([c.lon for c in clusters], dtype=float)[cluster_index],
         weight=per_particle[cluster_index],
@@ -240,9 +275,11 @@ _MOVED = -1  # internal status: the particle advanced normally
 class Observer(Protocol):
     """Receives particle positions during advection.
 
-    start is called once before the first step. observe is called at every time step k with
-    the indices of the particles that have a position at hours[k] and those positions. Values
-    passed to observe are only valid during the call.
+    start is called once before the first step. observe is called at time step k with the
+    indices of particles that have a position at hours[k] and those positions; with batching
+    it can be called several times for the same k, each time with different particles, so
+    observers must add up rather than overwrite totals. hours are counted from t0 and are
+    negative before it. Values passed to observe are only valid during the call.
     """
 
     def start(self, particles: Particles, hours: np.ndarray) -> None: ...
@@ -254,14 +291,19 @@ class Observer(Protocol):
 class Advection:
     """What happened to every particle; the positions went to the observers."""
 
-    hours: np.ndarray  # (K,) hours since t0
+    hours: np.ndarray  # (K,) hours since t0, negative before it
     times: np.ndarray  # (K,) datetime64[s], UTC
     release_step: np.ndarray  # (P,) index of the first position
     end_step: np.ndarray  # (P,) index of the last position
     fate: np.ndarray  # (P,) Fate values
+    t0_index: int  # index of t0 (hour 0) in hours
 
     def fate_counts(self) -> dict[str, int]:
         return {f.name.lower(): int((self.fate == f).sum()) for f in Fate}
+
+    @property
+    def forecast_hours(self) -> np.ndarray:
+        return self.hours[self.t0_index :]
 
 
 def degrees_per_hour(u, v, lat) -> tuple[np.ndarray, np.ndarray]:
@@ -342,16 +384,22 @@ def advect(
     dt_hours: float | None = None,
     diffusivity_m2s: float | None = None,
     seed: int | None = None,
+    batch_size: int | None = None,
 ) -> Advection:
     """Move all particles forward on the wind field, vectorised over particles.
 
-    The time axis runs from t0 (the field's first time, the current hour) to the end of the
-    field (t0 + 72 h) in steps of dt_hours. At step k the particles released at that hour join
-    in, the observers see every particle that has a position at hours[k], then every active
-    particle takes one step to hours[k + 1]. The loop is over time steps only (72 of them).
+    The time axis covers the whole field, from its first time (48 h before t0 for the
+    operational field, so smoke emitted before t0 is carried up to t0) to its last (t0 + 72 h),
+    in steps of dt_hours; hours are counted from t0. At step k the particles released at that
+    hour join in, the observers see every particle that has a position at hours[k], then every
+    active particle takes one step to hours[k + 1]. The loop is over time steps only.
 
     Only the current position of each particle is kept, so memory grows with the number of
-    particles, not particles x steps; observers decide what else to keep.
+    particles, not particles x steps; observers decide what else to keep. Particles go in
+    batches of at most batch_size (ADVECT_BATCH_PARTICLES), which bounds memory whatever the
+    number of fires. Each batch has its own random stream derived from the seed and the batch
+    number, so a run is reproducible for a given batch size. Observers receive global particle
+    indices and do not need to know about batches.
 
     dt_hours defaults to STEP_HOURS (1 h) and diffusivity_m2s to HORIZONTAL_DIFFUSIVITY_M2S.
     Both are parameters so the tests can halve dt and switch dispersion off.
@@ -361,53 +409,83 @@ def advect(
     if k_h < 0:
         raise ValueError("diffusivity must be >= 0")
     sigma_m = float(np.sqrt(2 * k_h * dt * SECONDS_PER_HOUR))
-    rng = np.random.default_rng(config.RANDOM_SEED if seed is None else seed)
+    base_seed = config.RANDOM_SEED if seed is None else seed
+    size = config.ADVECT_BATCH_PARTICLES if batch_size is None else batch_size
+    if size < 1:
+        raise ValueError("batch_size must be >= 1")
 
-    horizon = float(field.hours[-1])
-    n_steps = round(horizon / dt)
-    if not np.isclose(n_steps * dt, horizon):
-        raise ValueError(f"dt = {dt} h does not divide the {horizon} h horizon")
-    hours = np.arange(n_steps + 1) * dt
-    release_step = np.rint(particles.release_hour / dt).astype(int)
-    if not np.allclose(release_step * dt, particles.release_hour):
+    field_hours = field.hours
+    start, end = float(field_hours[0]), float(field_hours[-1])
+    n_steps = round((end - start) / dt)
+    if not np.isclose(start + n_steps * dt, end) or not np.isclose(start / dt, round(start / dt)):
+        raise ValueError(f"dt = {dt} h does not divide the field's time axis")
+    hours = start + np.arange(n_steps + 1) * dt
+    release_step = np.rint((particles.release_hour - start) / dt).astype(int)
+    if not np.allclose(start + release_step * dt, particles.release_hour):
         raise ValueError("release hours must be multiples of dt")
     if (release_step < 0).any() or (release_step > n_steps).any():
-        raise ValueError("release hours must lie within the horizon")
+        raise ValueError("release hours must lie within the wind field")
 
     for obs in observers:
         obs.start(particles, hours)
-
-    n_particles = len(particles)
-    lat = np.full(n_particles, np.nan)
-    lon = np.full(n_particles, np.nan)
-    fate = np.full(n_particles, Fate.HORIZON, dtype=np.int8)
+    fate = np.full(len(particles), Fate.HORIZON, dtype=np.int8)
     end_step = release_step.copy()
-    active = np.zeros(n_particles, dtype=bool)
-    # Particles grouped by release step, so each step finds its new particles without a scan.
-    by_release = np.argsort(release_step, kind="stable")
-    bounds = np.searchsorted(release_step[by_release], np.arange(n_steps + 2))
+    for b, lo in enumerate(range(0, len(particles), size)):
+        hi = min(lo + size, len(particles))
+        rng = np.random.default_rng([base_seed, b])
+        _advect_batch(field, particles, lo, hi, release_step, hours, dt, sigma_m, rng,
+                      observers, fate, end_step)  # fmt: skip
 
-    for k in range(n_steps + 1):
+    times = field.t0 + np.rint(hours * SECONDS_PER_HOUR).astype("timedelta64[s]")
+    return Advection(hours, times, release_step, end_step, fate, round(-start / dt))
+
+
+def _advect_batch(
+    field: WindField,
+    particles: Particles,
+    lo: int,
+    hi: int,
+    release_step: np.ndarray,
+    hours: np.ndarray,
+    dt: float,
+    sigma_m: float,
+    rng: np.random.Generator,
+    observers: tuple[Observer, ...] | list[Observer],
+    fate: np.ndarray,
+    end_step: np.ndarray,
+) -> None:
+    """The time loop for particles lo .. hi - 1. Writes their fate and end_step in place."""
+    n_steps = len(hours) - 1
+    release = release_step[lo:hi]
+    if release.size == 0:
+        return
+    lat = np.full(hi - lo, np.nan)
+    lon = np.full(hi - lo, np.nan)
+    active = np.zeros(hi - lo, dtype=bool)
+    # Particles grouped by release step, so each step finds its new particles without a scan.
+    by_release = np.argsort(release, kind="stable")
+    bounds = np.searchsorted(release[by_release], np.arange(n_steps + 2))
+
+    for k in range(int(release.min()), n_steps + 1):
         new = by_release[bounds[k] : bounds[k + 1]]
-        lat[new] = particles.lat0[new]
-        lon[new] = particles.lon0[new]
+        lat[new] = particles.lat0[lo + new]
+        lon[new] = particles.lon0[lo + new]
         active[new] = True
         idx = np.flatnonzero(active)
+        if idx.size == 0:
+            continue
         for obs in observers:
-            obs.observe(k, idx, lat[idx], lon[idx])
-        if k == n_steps or idx.size == 0:
+            obs.observe(k, idx + lo, lat[idx], lon[idx])
+        if k == n_steps:
             continue
         lat_n, lon_n, status = _step(field, lat[idx], lon[idx], hours[k], dt, sigma_m, rng)
         moved = status == _MOVED
         lat[idx[moved]] = lat_n[moved]
         lon[idx[moved]] = lon_n[moved]
-        end_step[idx[moved]] = k + 1
+        end_step[lo + idx[moved]] = k + 1
         halted = idx[~moved]
-        fate[halted] = status[~moved]
+        fate[lo + halted] = status[~moved]
         active[halted] = False
-
-    times = field.times[0] + np.rint(hours * SECONDS_PER_HOUR).astype("timedelta64[s]")
-    return Advection(hours, times, release_step, end_step, fate)
 
 
 # --- Observers -----------------------------------------------------------------------------
@@ -415,44 +493,74 @@ def advect(
 
 class PathRecorder:
     """Observer that keeps every position. Memory grows as particles x steps, so it is meant
-    for small sets: the tests and the display tracers."""
+    for small sets: the tests and the display tracers.
+
+    min_hour limits the record to hours >= min_hour (the display tracers keep only the
+    forecast, hour 0 on); dtype float32 halves the memory where 1e-5 degrees is precise enough.
+    """
 
     lat: np.ndarray
     lon: np.ndarray
+    k_min: int  # first recorded time step
+
+    def __init__(self, min_hour: float | None = None, dtype: type = np.float64) -> None:
+        self.min_hour = min_hour
+        self.dtype = dtype
 
     def start(self, particles: Particles, hours: np.ndarray) -> None:
-        self.lat = np.full((len(particles), len(hours)), np.nan)
-        self.lon = np.full((len(particles), len(hours)), np.nan)
+        if self.min_hour is None:
+            self.k_min = 0
+        else:
+            self.k_min = int(np.searchsorted(hours, self.min_hour - 1e-9))
+        shape = (len(particles), len(hours) - self.k_min)
+        self.lat = np.full(shape, np.nan, dtype=self.dtype)
+        self.lon = np.full(shape, np.nan, dtype=self.dtype)
 
     def observe(self, k: int, idx: np.ndarray, lat: np.ndarray, lon: np.ndarray) -> None:
-        self.lat[idx, k] = lat
-        self.lon[idx, k] = lon
+        if k >= self.k_min:
+            self.lat[idx, k - self.k_min] = lat
+            self.lon[idx, k - self.k_min] = lon
+
+
+def removal_factor(age_hours, lifetime_hours: float | None = None) -> np.ndarray:
+    """Share of a particle's smoke still airborne after age_hours: exp(-age / lifetime).
+
+    First-order removal, the same for every particle whatever the weather; the lifetime and its
+    justification are in risk.py. lifetime_hours None uses REMOVAL_LIFETIME_HOURS, inf disables
+    removal. The particles themselves keep moving; only the smoke they carry shrinks.
+    """
+    tau = config.REMOVAL_LIFETIME_HOURS if lifetime_hours is None else lifetime_hours
+    return np.exp(-np.asarray(age_hours, dtype=float) / tau)
 
 
 class DensityGrid:
     """Observer: time-integrated smoke on a regular grid, for maps.
 
-    load[row, col] sums weight x hours of every particle in the cell, over the whole forecast.
+    load[row, col] sums weight x removal x hours of every particle in the cell, over the
+    forecast window (hours >= 0; the past only carries the smoke up to t0).
     """
 
-    def __init__(self, cell_deg: float = 0.1) -> None:
+    def __init__(self, cell_deg: float = 0.1, lifetime_hours: float | None = None) -> None:
         self.cell = cell_deg
+        self.lifetime_hours = lifetime_hours
         self.ny = int(np.ceil((config.LAT_MAX - config.LAT_MIN) / cell_deg))
         self.nx = int(np.ceil((config.LON_MAX - config.LON_MIN) / cell_deg))
         self.load = np.zeros((self.ny, self.nx))
 
     def start(self, particles: Particles, hours: np.ndarray) -> None:
         self._weight = particles.weight
+        self._release = particles.release_hour
+        self._hours = hours
         self._dt = float(hours[1] - hours[0]) if len(hours) > 1 else 1.0
 
     def observe(self, k: int, idx: np.ndarray, lat: np.ndarray, lon: np.ndarray) -> None:
-        if idx.size == 0:
+        if idx.size == 0 or self._hours[k] < 0:
             return
         row = np.clip(((lat - config.LAT_MIN) / self.cell).astype(int), 0, self.ny - 1)
         col = np.clip(((lon - config.LON_MIN) / self.cell).astype(int), 0, self.nx - 1)
-        flat = np.bincount(
-            row * self.nx + col, weights=self._weight[idx] * self._dt, minlength=self.ny * self.nx
-        )
+        age = self._hours[k] - self._release[idx]
+        w = self._weight[idx] * removal_factor(age, self.lifetime_hours) * self._dt
+        flat = np.bincount(row * self.nx + col, weights=w, minlength=self.ny * self.nx)
         self.load += flat.reshape(self.ny, self.nx)
 
 
@@ -462,7 +570,9 @@ class TrajectorySet:
 
     lat[p, k] and lon[p, k] give the position of particle p at hours[k]. They are NaN before
     its release (k < release_step[p]) and after it stops (k > end_step[p]); in between, every
-    value is a finite position inside the domain.
+    value is a finite position inside the domain. When only part of the time axis was recorded
+    (min_hour), release_step and end_step index the recorded columns: a particle released
+    earlier starts at column 0, and one that stopped earlier has end_step = -1 < release_step.
     """
 
     hours: np.ndarray  # (K,) hours since t0
@@ -485,23 +595,29 @@ def trace(
     dt_hours: float | None = None,
     diffusivity_m2s: float = 0.0,
     seed: int | None = None,
+    min_hour: float | None = None,
+    dtype: type = np.float64,
 ) -> TrajectorySet:
-    """Advect and keep the full path of every particle.
+    """Advect and keep the full path of every particle (from min_hour on, if given).
 
     Deterministic by default (no dispersion): used for the display tracers, whose paths show
     the axis of each puff on the map, and by the tests of the integrator.
     """
-    recorder = PathRecorder()
+    recorder = PathRecorder(min_hour, dtype)
     adv = advect(field, particles, [recorder], dt_hours, diffusivity_m2s, seed)
+    k_min = recorder.k_min
+    release = np.maximum(adv.release_step - k_min, 0)
+    end = adv.end_step - k_min
+    gone = end < 0  # stopped before the first recorded step
     return TrajectorySet(
-        hours=adv.hours,
-        times=adv.times,
+        hours=adv.hours[k_min:],
+        times=adv.times[k_min:],
         lat=recorder.lat,
         lon=recorder.lon,
         cluster_index=particles.cluster_index,
         weight=particles.weight,
-        release_step=adv.release_step,
-        end_step=adv.end_step,
+        release_step=np.where(gone, 0, release),
+        end_step=np.where(gone, -1, end),
         fate=adv.fate,
     )
 

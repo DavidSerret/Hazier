@@ -279,10 +279,28 @@ def test_observers_see_every_position_once():
 
 def test_density_grid_conserves_weight_hours():
     parts = tj.release_particles([cluster(0, 0.0, 105.0, 480.0)], particles_per_release=5)
-    density = tj.DensityGrid(cell_deg=0.5)
+    density = tj.DensityGrid(cell_deg=0.5, lifetime_hours=float("inf"))  # no removal
     adv = tj.advect(uniform(2.0, 1.0), parts, [density])
     expected = float((parts.weight * (adv.end_step - adv.release_step + 1)).sum())
     assert density.load.sum() == pytest.approx(expected)
+
+
+def test_density_grid_applies_removal():
+    parts = tj.release_particles([cluster(0, 0.0, 105.0, 480.0)], particles_per_release=5)
+    density = tj.DensityGrid(cell_deg=0.5, lifetime_hours=72.0)
+    adv = tj.advect(uniform(2.0, 1.0), parts, [density])
+    expected = 0.0
+    for p in range(len(parts)):
+        ages = adv.hours[adv.release_step[p] : adv.end_step[p] + 1] - parts.release_hour[p]
+        expected += parts.weight[p] * np.exp(-ages / 72.0).sum()
+    assert density.load.sum() == pytest.approx(expected)
+
+
+def test_removal_factor():
+    assert tj.removal_factor(0.0) == 1.0
+    assert tj.removal_factor(72.0, 72.0) == pytest.approx(math.exp(-1))
+    assert tj.removal_factor(config.REMOVAL_LIFETIME_HOURS) == pytest.approx(math.exp(-1))
+    assert tj.removal_factor(500.0, float("inf")) == 1.0
 
 
 # --- integration bookkeeping -----------------------------------------------------------

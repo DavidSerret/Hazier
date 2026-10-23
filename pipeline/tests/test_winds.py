@@ -10,7 +10,8 @@ from hazier.sources import winds
 
 NOW = datetime(2026, 9, 14, 14, 44, tzinfo=UTC)
 RUN_INIT = datetime(2026, 9, 14, 12, 0, tzinfo=UTC)
-DAY_START = int(datetime(2026, 9, 14, tzinfo=UTC).timestamp())
+# past_days=2: the hourly axis starts at 00:00 UTC two days before "now", 6 days long.
+DAY_START = int(datetime(2026, 9, 12, tzinfo=UTC).timestamp())
 N_POINTS = 21 * 26
 
 
@@ -48,7 +49,7 @@ class FakeAPI:
         self.meta_fails = False
         self.failing_requests = {}  # 1-based request number -> status code
         self.null_points = set()  # (lat, lon) whose values come back as null
-        self.hours = 96
+        self.hours = 144
         self.raises = None
 
     def __call__(self, url, params=None, timeout=None):
@@ -149,6 +150,7 @@ def test_request_parameters(api, tmp_path):
     assert p["hourly"] == "wind_speed_850hPa,wind_direction_850hPa"
     assert p["wind_speed_unit"] == "ms"
     assert p["forecast_days"] == config.WIND_FORECAST_DAYS
+    assert p["past_days"] == config.WIND_PAST_DAYS == 2
     assert p["timezone"] == "GMT" and p["timeformat"] == "unixtime"
 
 
@@ -173,12 +175,14 @@ def test_throttle_keeps_rate_under_limit(api, tmp_path, sleeps):
 
 def test_field_shape_axes_and_times(api, tmp_path):
     f = fetch(tmp_path).field
-    assert f.u.shape == f.v.shape == (73, 21, 26)
+    assert f.u.shape == f.v.shape == (121, 21, 26)  # 48 h before t0, t0, 72 h after
     assert f.lats[0] == -8 and f.lats[-1] == 12 and f.lons[0] == 95 and f.lons[-1] == 120
     assert f.times.dtype == np.dtype("datetime64[s]")
-    assert str(f.times[0]) == "2026-09-14T14:00:00"  # the current hour, not midnight
-    assert str(f.times[-1]) == "2026-09-17T14:00:00"  # 72 h later
-    assert np.all(np.diff(f.hours) == 1) and f.hours[-1] == 72
+    assert f.t0_index == 48
+    assert str(f.t0) == "2026-09-14T14:00:00"  # the current hour, not midnight
+    assert str(f.times[0]) == "2026-09-12T14:00:00"  # 48 h before t0
+    assert str(f.times[-1]) == "2026-09-17T14:00:00"  # 72 h after t0
+    assert np.all(np.diff(f.hours) == 1) and f.hours[0] == -48 and f.hours[-1] == 72
 
 
 def test_values_land_on_the_right_node(api, tmp_path):

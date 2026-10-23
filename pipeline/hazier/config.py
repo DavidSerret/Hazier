@@ -26,6 +26,12 @@ WIND_MODEL = "ecmwf_ifs025"
 # The API's hourly axis starts at 00:00 UTC of the current day. To cover "now" to "now + 72 h"
 # at any hour of the day, 23 + 72 = 95 hourly steps are needed, i.e. 4 whole days.
 WIND_FORECAST_DAYS = 4
+# Past winds, to carry the smoke emitted before t0 (since the earliest hotspot of the 48 h
+# lookback) up to t0. past_days=2 starts the axis at 00:00 UTC two days ago, so it always covers
+# t0 - 48 h. Open-Meteo counts a location as more than one call only beyond 10 variables or
+# 2 weeks of data, so 6 days of 2 variables still cost one call per location.
+WIND_PAST_DAYS = 2
+WIND_PAST_HOURS = 48  # the wind field starts this long before t0
 
 # Open-Meteo counts each location of a multi-location request as one call.
 # Free limits: 600 / min, 5,000 / h, 10,000 / day. One run is 546 calls; at 250 / min it takes
@@ -77,6 +83,11 @@ CLUSTER_MIN_FRP_MW = 25.0
 RELEASE_INTERVAL_HOURS = 1
 PARTICLES_PER_RELEASE = 20
 
+# Particles are advected in batches of at most this many, so peak memory stays flat however
+# many particles a busy day produces. Batches use separate random streams derived from
+# RANDOM_SEED, so results are reproducible for a given batch size.
+ADVECT_BATCH_PARTICLES = 250_000
+
 # Horizontal dispersion: random walk with this diffusivity (m2/s), see trajectories.py.
 # 2e4 m2/s spreads a puff to a standard deviation of about 60 km after 24 h and 100 km after 72 h.
 HORIZONTAL_DIFFUSIVITY_M2S = 2.0e4
@@ -95,8 +106,21 @@ TRAJ_EXPORT_PRIORITY_SHARE = 0.6
 # 0.01 degrees is about 1.1 km: finer than the model can resolve, coarse enough to stay small.
 TRAJ_EXPORT_DECIMALS = 2
 
-# ETA range: from the first hour the smoke index reaches moderate / factor to the first hour it
-# reaches moderate * factor (see risk.py).
+# Smoke removal: particle weights decay as exp(-age / lifetime), age counted from the release.
+# 3 days is typical for fine smoke aerosol in the humid tropics, see risk.py.
+REMOVAL_LIFETIME_HOURS = 72.0
+
+# Arrival of smoke at a zone (internal, for the ETA and the agreement flag; NOT an air quality
+# level): the first hour the smoke index reaches this value. PROVISIONAL, see risk.py.
+# With the 3-day removal, 10 is about what one cluster of 360 MW (summed FRP over 48 h, the
+# upper quartile of the 23 Oct 2026 clusters) gives when a third of its plume covers a zone
+# after a day of travel: (360 / 48) * 5.5 h * 1/3 * exp(-24 / 72). Smaller fires count only
+# when several add up. A lone cluster at the 25 MW minimum can not reach it even with its whole
+# plume over the zone.
+SMOKE_ARRIVAL_THRESHOLD = 10.0
+
+# ETA range: from the first hour the smoke index reaches threshold / factor to the first hour it
+# reaches threshold * factor (see risk.py).
 ETA_RANGE_FACTOR = 2.0
 
 # Zone receptors: circles of this radius around each centre.
@@ -127,23 +151,78 @@ ZONES: tuple[Zone, ...] = (
 
 DEFAULT_ZONE_ID = "klang_valley"
 
-# Our own smoke risk levels: lower bound of the smoke index (see risk.py) for each level.
-# These are NOT Malaysian API categories (those apply only to real PM2.5 concentrations).
-# PROVISIONAL AND UNCALIBRATED: set by judgement on the October 2026 data, to be calibrated
-# against APIMS and CAMS in phase 2.
-RISK_LEVEL_THRESHOLDS: tuple[tuple[str, float], ...] = (
-    ("low", 0.0),
-    ("moderate", 10.0),
-    ("high", 50.0),
-    ("very_high", 200.0),
-)
+# --- CAMS PM2.5 and the Malaysian API categories ---------------------------------------------
 
-# Malaysian API categories applied to CAMS PM2.5 (ug/m3): upper bound of each category.
-# TODO: verify the breakpoints against the current DOE API guidance before using them.
+# Malaysian API (Indeks Pencemar Udara, IPU) categories applied to CAMS PM2.5 (ug/m3): upper
+# bound of each category, for API bands 0-50, 51-100, 101-200, 201-300 and above 300.
+#
+# TODO: BREAKPOINTS PROVISIONAL, SOURCES CONFLICT. The official calculation document of the
+# Department of Environment ("Pengiraan Indeks Pencemar Udara (IPU) / Air Pollutant Index (API)
+# Calculation", https://apims.doe.gov.my/pdf/API_Calculation.pdf) could not be opened (HTTP 404
+# on 24 Oct 2026). Two candidate tables are known, and they disagree on where "unhealthy"
+# starts:
+#
+#   Candidate A (in use), ExpatGo, 31 Aug 2026, "comparison" table, which says it may differ
+#   from the DOE's own calculation:
+#       good 0-15, moderate 16-35, unhealthy 36-75, very unhealthy 76-250, hazardous 251+
+#       ("unhealthy", API 101, starts just above 35 ug/m3)
+#
+#   Candidate B, a formula attributed to the DOE by another source:
+#       API 101 ("unhealthy") at 75.5 ug/m3
+#       The other band edges of this table could not be found or confirmed, so it can not be
+#       used as it stands. If it is right, candidate A classifies 36 to 75 ug/m3 one band too
+#       high.
+#
+# Candidate A is consistent with the 35 ug/m3 Malaysian ambient air quality target. PM2.5 was
+# added to the API on 16 Aug 2018 (national haze action plan). A third site (aqihub.info) lists
+# 1-hour values of 0-103 for "good", implausible for PM2.5, not used.
+# Flip PM25_BREAKPOINTS_VERIFIED to True only after checking the DOE document; the flag is
+# published in forecast.json so the web can label the categories as provisional until then.
+PM25_BREAKPOINTS_VERIFIED = False
 PM25_CATEGORY_UPPER_BOUNDS: tuple[tuple[str, float], ...] = (
-    ("good", 12.0),
-    ("moderate", 35.4),
-    ("unhealthy", 150.4),
-    ("very_unhealthy", 250.4),
+    ("good", 15.0),
+    ("moderate", 35.0),
+    ("unhealthy", 75.0),
+    ("very_unhealthy", 250.0),
     ("hazardous", float("inf")),
 )
+
+# Averaging period of the PM2.5 sub-index, in hours: the category of a time is taken from the
+# trailing mean of CAMS over this many hours (the hour itself and the ones before it).
+# VERIFIED: the DOE computes the PM2.5 sub-index from a 24-hour moving average, reported hourly,
+# according to several sources citing the DOE's general information on the API (among them
+# Malay Mail, 8 Oct 2026, "Hazy math: DOE explains why your AQI says 250 when the official API
+# is 175"). The one site that says 1 hour (aqihub.info) is the one with implausible values.
+PM25_AVERAGING_HOURS = 24
+PM25_AVERAGING_VERIFIED = True
+
+# CAMS request (Open-Meteo air quality API): the global domain, explicitly, so the result does
+# not silently switch to the European one. The past day gives the history for the trailing mean.
+CAMS_DOMAIN = "cams_global"
+CAMS_RESOLUTION_KM = 45.0  # 0.4 degrees
+CAMS_PAST_DAYS = 1
+CAMS_FORECAST_DAYS = 4  # as WIND_FORECAST_DAYS: covers the current hour plus 72 h at any time
+CAMS_TIMEOUT_S = 60
+CAMS_RETRIES = 1
+CAMS_BACKOFF_S = 10.0
+# The series in forecast.json has one point every this many hours (CAMS is 3-hourly upstream).
+CAMS_EXPORT_STEP_HOURS = 3
+
+# Agreement between Hazier and CAMS over the window (see cams.agreement_flag): Hazier sees smoke
+# when its smoke index reaches SMOKE_ARRIVAL_THRESHOLD, CAMS when its peak category reaches
+# this one. PROVISIONAL: Malaysian cities often sit at "moderate" PM2.5 without any smoke, so
+# the CAMS side starts at "unhealthy" (24 h mean above 35 ug/m3).
+CAMS_ELEVATED_MIN_CATEGORY = "unhealthy"
+
+# Trend for the zone card: the CAMS mean over the next 24 h against the mean over the last
+# 24 h. "worsening" / "improving" when it changes by more than TREND_RELATIVE of the last
+# mean and by at least TREND_MIN_UGM3 (so tiny changes on clean days stay "stable").
+TREND_RELATIVE = 0.15
+TREND_MIN_UGM3 = 3.0
+
+# CAMS map layer: PM2.5 on the wind grid (546 points), fetched in batches like the winds and
+# throttled to the same rate, so a run adds about 2 minutes and 546 calls.
+CAMS_GRID_BATCH_SIZE = 50
+CAMS_GRID_MAX_CALLS_PER_MIN = 250
+# Exported values are rounded to this step (ug/m3) and written as integers.
+CAMS_GRID_QUANTUM_UGM3 = 1.0

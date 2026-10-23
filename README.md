@@ -2,14 +2,14 @@
 
 Haze forecaster for Malaysia and the southern ASEAN region. It predicts whether, when and from where transboundary smoke (mainly from fires in Sumatra and Borneo) will reach each zone, with a clear, public-friendly interface.
 
-Hazier does not replace the CAMS (Copernicus) PM2.5 forecast. It uses CAMS as a baseline and adds source attribution (which fire clusters the smoke comes from) and a readable arrival time ("smoke reaches Klang Valley in about 30 h").
+Hazier does not replace the CAMS (Copernicus) PM2.5 forecast: the air quality level it shows is the CAMS PM2.5 and its Malaysian API category. What Hazier adds is source attribution (which provinces the smoke comes from), a readable arrival time ("smoke reaches Klang Valley in about 30 h") and the smoke paths.
 
 Status: early scaffold, no forecasting logic yet.
 
 ## How it works
 
 1. A Python pipeline downloads active fire hotspots (NASA FIRMS, VIIRS) and 850 hPa winds (Open-Meteo).
-2. It advects smoke forward from each hotspot for 72 h and scores the risk for each zone.
+2. It carries the smoke of each fire with the winds, from its first detection to 72 h ahead, and works out when it reaches each zone and where it comes from. It also fetches CAMS PM2.5 for the zones and the map.
 3. It writes a single `forecast.json`. The web app reads only this file.
 4. GitHub Actions runs the pipeline every 6 hours and publishes the site to GitHub Pages.
 
@@ -45,7 +45,8 @@ Other debug commands (from `pipeline/`):
 
 ```
 .venv\Scripts\python.exe -m hazier.sources.winds          # 850 hPa winds, cached per model run
-.venv\Scripts\python.exe -m hazier.model.risk             # full model: zone risk table, saves output/trajectories.png
+.venv\Scripts\python.exe -m hazier.model.risk             # full model: zone table (CAMS level, smoke ETA, origin), saves output/trajectories.png
+.venv\Scripts\python.exe -m hazier.sources.cams           # CAMS PM2.5 for the zones and the map grid (--no-grid for zones only)
 ```
 
 Web (uses `public/forecast.sample.json` until the pipeline produces real data):

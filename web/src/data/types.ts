@@ -6,16 +6,16 @@
 
 export const SCHEMA_VERSION = 1;
 
-// Our own trajectory risk levels.
-export type RiskLevel = "low" | "moderate" | "high" | "very_high";
-
-// Malaysian API categories, used only for CAMS PM2.5 concentrations.
+// Malaysian API categories, used for CAMS PM2.5 concentrations: the air quality shown to users.
 export type Pm25Category =
   | "good"
   | "moderate"
   | "unhealthy"
   | "very_unhealthy"
   | "hazardous";
+
+// CAMS over the next 24 h compared with the last 24 h, for the zone card.
+export type Trend = "improving" | "stable" | "worsening";
 
 export type SourceName = "firms" | "winds" | "cams" | "apims";
 
@@ -38,6 +38,7 @@ export interface SourceCluster {
   hotspot_count: number;
   latest_at: string;
   region: string;
+  first_at: string; // earliest detection in the 48 h lookback; "" when unknown
 }
 
 export interface Trajectory {
@@ -51,37 +52,39 @@ export interface Trajectory {
 
 export interface SourceShare {
   region: string;
-  share: number;
+  share: number; // 0 to 1 in steps of 0.001; the shares of a zone sum to exactly 1
 }
 
-export interface RiskPoint {
-  hour: number;
-  index: number; // smoke index, >= 0 and unbounded
-  level: RiskLevel;
-}
+// Whether Hazier expects smoke from the detected fires and whether CAMS expects elevated PM2.5,
+// over the window. For verification, not for display.
+export type AgreementFlag = "both_elevated" | "hazier_only" | "cams_only" | "both_low";
 
 export interface Pm25Point {
   time: string;
-  value_ugm3: number;
+  value_ugm3: number; // CAMS hourly value at the zone centre
+  basis_ugm3: number; // trailing mean the category is based on
   category: Pm25Category;
 }
 
+// One zone: air quality from CAMS; smoke timing and origin from Hazier. The level shown to
+// users is the CAMS category; Hazier publishes no level of its own.
 export interface ZoneForecast {
   id: string;
   name: string;
   lat: number;
   lon: number;
   radius_km: number;
-  risk_index: number; // peak smoke index
-  risk_level: RiskLevel;
-  peak_hour: number | null;
-  eta_hours: number | null;
-  // Both null when eta_hours is null; eta_latest_hours null alone means "possibly after 72 h".
-  eta_earliest_hours: number | null;
-  eta_latest_hours: number | null;
-  sources: SourceShare[];
-  risk_series: RiskPoint[];
-  cams_pm25: Pm25Point[];
+  // 0: smoke already there at t0; null: not within the horizon. Earliest and latest are null
+  // with the ETA; latest alone null means "possibly after 72 h".
+  smoke_eta_hours: number | null;
+  smoke_eta_earliest_hours: number | null;
+  smoke_eta_latest_hours: number | null;
+  smoke_sources: SourceShare[];
+  cams_now: Pm25Point | null; // at t0: the level to show on the card
+  cams_peak: Pm25Point | null; // the hour of the highest category basis in the window
+  cams_trend: Trend | null;
+  cams_pm25: Pm25Point[]; // empty when CAMS has no data for the zone
+  agreement: AgreementFlag | null;
 }
 
 // ok: all data arrived. degraded: usable but incomplete, show a warning.
@@ -95,6 +98,49 @@ export interface SourceStatus {
   detail: string | null;
 }
 
+// Credit that must be shown wherever the data is shown.
+export interface Attribution {
+  name: string;
+  text: string;
+  url: string;
+}
+
+// How to read cams_pm25: where it comes from and how the categories were derived.
+export interface Pm25Baseline {
+  source: string;
+  resolution_km: number; // about 45: one value stands for a cell much larger than a zone
+  step_hours: number; // spacing of the points in cams_pm25
+  averaging_hours: number; // trailing mean behind each category
+  averaging_verified: boolean; // whether that averaging period is confirmed as the DOE's
+  // False until the Malaysian API breakpoints are checked against the DOE document:
+  // the web must label the categories as provisional.
+  categories_verified: boolean;
+  category_upper_bounds: Record<Pm25Category, number | null>; // ug/m3, null = open ended
+  cams_elevated_category: Pm25Category;
+}
+
+// CAMS PM2.5 on the wind grid for the map colour layer. values is row-major (frame, lat, lon),
+// latitude south to north, longitude west to east; concentration = value * quantum_ugm3, null
+// = missing. Same averaging basis as the zone categories.
+export interface Pm25Grid {
+  lats: number[];
+  lons: number[];
+  hours: number[];
+  averaging_hours: number;
+  quantum_ugm3: number;
+  values: (number | null)[];
+}
+
+// How Hazier's smoke timing and attribution were made. Not an air quality measure.
+export interface SmokeModel {
+  wind_model: string;
+  level_hpa: number;
+  lookback_hours: number;
+  past_hours: number;
+  removal_lifetime_hours: number;
+  arrival_threshold: number; // internal smoke index units, provisional
+}
+
 export interface Forecast {
   generated_at: string;
   horizon_hours: number;
@@ -102,7 +148,10 @@ export interface Forecast {
   clusters: SourceCluster[];
   trajectories: Trajectory[];
   zones: ZoneForecast[];
-  risk_thresholds: Record<RiskLevel, number>; // lower bound of the smoke index per level
+  smoke_model: SmokeModel;
   source_status: SourceStatus[];
+  attributions: Attribution[];
+  pm25_baseline: Pm25Baseline | null; // null when the CAMS step produced nothing
+  pm25_grid: Pm25Grid | null; // null when the CAMS grid could not be fetched
   schema_version: number;
 }

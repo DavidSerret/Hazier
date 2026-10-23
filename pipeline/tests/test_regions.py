@@ -63,6 +63,22 @@ def test_label_clusters():
     assert regions.label_clusters([]) == []
 
 
+def test_drop_offshore_removes_flares_keeps_shore_fires_and_renumbers():
+    clusters = regions.label_clusters(
+        [
+            cluster(0, 10.4, 108.2, 400.0),  # oil field in the South China Sea
+            cluster(1, 0.51, 101.45, 300.0),  # Riau
+            cluster(2, 1.75, 101.6, 200.0),  # 10 km off the Riau coast: shore fire
+            cluster(3, 5.0, 108.0, 100.0),  # open sea
+        ]
+    )
+    split = regions.drop_offshore(clusters)
+    assert [(c.id, c.region) for c in split.kept] == [(0, "Riau"), (1, "Riau")]
+    assert [c.id for c in split.dropped] == [0, 3]
+    assert split.dropped_frp_mw == 500.0
+    assert regions.drop_offshore([]).kept == []
+
+
 def test_data_file_is_small_and_documented():
     text = regions.REGIONS_FILE.read_text(encoding="utf-8")
     assert len(text.encode()) < 300_000
