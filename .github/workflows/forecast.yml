@@ -1,8 +1,9 @@
 name: forecast
 
 on:
-  schedule:
-    - cron: "0 */6 * * *"
+  # TODO: re-enable the 6-hourly schedule once the pipeline works end to end.
+  # schedule:
+  #   - cron: "0 */6 * * *"
   workflow_dispatch:
 
 permissions:

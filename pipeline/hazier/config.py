@@ -17,8 +17,31 @@ HORIZON_HOURS = 72
 STEP_HOURS = 1
 PRESSURE_LEVEL_HPA = 850
 
-# FIRMS: hotspots from the last 48 h
+# FIRMS: hotspots from the last 48 h. The area API takes whole days (1 to 5), so 2 days is
+# fetched and anything older than the lookback is dropped afterwards.
 FIRMS_LOOKBACK_HOURS = 48
+FIRMS_DAY_RANGE = 2
+
+# VIIRS near-real-time sources: (label used in the data, FIRMS source id)
+FIRMS_SOURCES: tuple[tuple[str, str], ...] = (
+    ("S-NPP", "VIIRS_SNPP_NRT"),
+    ("NOAA-20", "VIIRS_NOAA20_NRT"),
+    ("NOAA-21", "VIIRS_NOAA21_NRT"),
+)
+
+# Quality filter: detections below this VIIRS confidence class are dropped ("low" < "nominal" < "high").
+FIRMS_MIN_CONFIDENCE = "nominal"
+
+# Deduplication across satellites. The three satellites overpass within about an hour of each
+# other and see the same ~375 m pixel, so two detections closer than both thresholds are one fire.
+# Detections of the same spot at overpasses hours apart are kept as separate observations.
+FIRMS_DEDUP_DISTANCE_KM = 0.5
+FIRMS_DEDUP_WINDOW_MIN = 180
+
+# HTTP behaviour: one retry after a short backoff on timeouts, connection errors, 429 and 5xx.
+FIRMS_TIMEOUT_S = 30
+FIRMS_RETRIES = 1
+FIRMS_BACKOFF_S = 3.0
 
 # Zone receptors: circles of this radius around each centre.
 ZONE_RADIUS_KM = 50.0

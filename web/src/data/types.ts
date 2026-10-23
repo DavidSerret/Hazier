@@ -26,6 +26,7 @@ export interface Hotspot {
   frp_mw: number;
   confidence: string;
   acquired_at: string;
+  satellite: string;
   region: string;
 }
 

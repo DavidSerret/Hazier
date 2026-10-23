@@ -35,7 +35,8 @@ class Hotspot:
     frp_mw: float  # fire radiative power, drives glow size
     confidence: str  # VIIRS confidence class: "low", "nominal" or "high"
     acquired_at: str  # UTC
-    region: str  # source region label, for example "Riau"
+    satellite: str  # "S-NPP", "NOAA-20" or "NOAA-21"
+    region: str = ""  # source region label, for example "Riau"; filled by the attribution step
 
 
 @dataclass

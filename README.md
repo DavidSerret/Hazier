@@ -33,6 +33,14 @@ pip install -e ".[dev]"
 pytest
 ```
 
+Real FIRMS fetch (needs a free MAP_KEY from https://firms.modaps.eosdis.nasa.gov/api/map_key/):
+
+```
+cd pipeline
+copy .env.example .env        # then put your key in .env
+.venv\Scripts\python.exe -m hazier.sources.firms
+```
+
 Web (uses `public/forecast.sample.json` until the pipeline produces real data):
 
 ```
