@@ -232,9 +232,10 @@ def deduplicate(hotspots: list[Hotspot]) -> list[Hotspot]:
 def fetch_hotspots(api_key: str | None = None, now: datetime | None = None) -> FirmsResult:
     """Fetch, filter and deduplicate the last 48 h of VIIRS hotspots. Never raises.
 
-    The returned status is ok when at least one satellite answered. Satellites that failed are
-    listed in failed_satellites. SourceStatus.last_ok is set only on success; on failure it is
-    None and the caller merges it with the previous run's value.
+    The status is ok when every satellite answered, degraded when some but not all did (the
+    data is returned and the failed ones are named in the detail and in failed_satellites), and
+    failed when none did. SourceStatus.last_ok is set whenever data was returned; on failure it
+    is None and the caller merges it with the previous run's value.
     """
     now = now or datetime.now(UTC)
     key = api_key or os.environ.get(KEY_ENV)
@@ -242,7 +243,8 @@ def fetch_hotspots(api_key: str | None = None, now: datetime | None = None) -> F
 
     if not key:
         log.error("FIRMS: %s is not set", KEY_ENV)
-        return FirmsResult([], SourceStatus("firms", False, None), failed_satellites=labels)
+        status = SourceStatus("firms", "failed", None, f"{KEY_ENV} is not set")
+        return FirmsResult([], status, failed_satellites=labels)
 
     all_hotspots: list[Hotspot] = []
     counts: dict[str, SatelliteCounts] = {}
@@ -260,14 +262,20 @@ def fetch_hotspots(api_key: str | None = None, now: datetime | None = None) -> F
             failed.append(label)
 
     if len(failed) == len(labels):
-        return FirmsResult([], SourceStatus("firms", False, None), failed_satellites=failed)
+        status = SourceStatus("firms", "failed", None, "no satellite answered")
+        return FirmsResult([], status, failed_satellites=failed)
+
     if failed:
-        log.warning("FIRMS: partial data, failed satellites: %s", ", ".join(failed))
+        detail = f"no data from {', '.join(failed)}"
+        log.warning("FIRMS: degraded, %s", detail)
+        status = SourceStatus("firms", "degraded", _iso(now), detail)
+    else:
+        status = SourceStatus("firms", "ok", _iso(now))
 
     unique = deduplicate(all_hotspots)
     return FirmsResult(
         hotspots=unique,
-        status=SourceStatus("firms", True, _iso(now)),
+        status=status,
         counts=counts,
         failed_satellites=failed,
         duplicates_removed=len(all_hotspots) - len(unique),
@@ -299,13 +307,8 @@ def _report(result: FirmsResult, now: datetime) -> None:
         frp = sorted(h.frp_mw for h in hs)
         print(f"FRP MW: median {frp[len(frp) // 2]:.1f}, max {frp[-1]:.1f}")
         print(f"acquired: {hs[0].acquired_at} to {hs[-1].acquired_at}")
-    state = "OK" if result.status.ok else "FAILED"
-    extra = (
-        f"  failed satellites: {', '.join(result.failed_satellites)}"
-        if result.failed_satellites
-        else ""
-    )
-    print(f"status: {state}{extra}")
+    detail = f"  ({result.status.detail})" if result.status.detail else ""
+    print(f"status: {result.status.state.upper()}{detail}")
 
 
 def main() -> int:
@@ -314,7 +317,7 @@ def main() -> int:
     now = datetime.now(UTC)
     result = fetch_hotspots(now=now)
     _report(result, now)
-    return 0 if result.status.ok else 1
+    return 0 if result.status.usable else 1
 
 
 if __name__ == "__main__":

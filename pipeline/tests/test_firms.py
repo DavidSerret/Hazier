@@ -216,7 +216,10 @@ def test_partial_failure_keeps_other_satellites(monkeypatch):
 
     patch_get(monkeypatch, handler)
     result = firms.fetch_hotspots(KEY, NOW)
-    assert result.status.ok
+    assert result.status.state == "degraded"
+    assert result.status.usable and not result.status.ok
+    assert result.status.last_ok == "2026-09-14T12:00:00Z"
+    assert result.status.detail == "no data from NOAA-20"
     assert result.failed_satellites == ["NOAA-20"]
     assert result.hotspots  # S-NPP and NOAA-21 data still returned
     assert all(h.satellite != "NOAA-20" for h in result.hotspots)

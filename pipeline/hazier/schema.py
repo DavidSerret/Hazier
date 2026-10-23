@@ -25,6 +25,7 @@ RiskLevel = Literal["low", "moderate", "high", "very_high"]
 Pm25Category = Literal["good", "moderate", "unhealthy", "very_unhealthy", "hazardous"]
 
 SourceName = Literal["firms", "winds", "cams", "apims"]
+SourceState = Literal["ok", "degraded", "failed"]
 
 
 @dataclass
@@ -86,8 +87,19 @@ class ZoneForecast:
 @dataclass
 class SourceStatus:
     name: SourceName
-    ok: bool
+    # ok: all data arrived. degraded: usable but incomplete (the web shows a warning).
+    # failed: no usable data, the last valid forecast is served instead.
+    state: SourceState
     last_ok: str | None  # UTC of the last successful fetch, null if never
+    detail: str | None = None  # short reason shown in the UI for degraded and failed
+
+    @property
+    def ok(self) -> bool:
+        return self.state == "ok"
+
+    @property
+    def usable(self) -> bool:
+        return self.state != "failed"
 
 
 @dataclass

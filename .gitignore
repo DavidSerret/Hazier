@@ -17,6 +17,7 @@ web/dist/
 # Generated forecast (published to Pages only, never committed)
 /forecast.json
 pipeline/forecast.json
+pipeline/.cache/
 web/public/forecast.json
 
 # Environment and editors

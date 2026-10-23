@@ -17,6 +17,26 @@ HORIZON_HOURS = 72
 STEP_HOURS = 1
 PRESSURE_LEVEL_HPA = 850
 
+# Winds (Open-Meteo forecast API). One global model is named explicitly, never "best_match",
+# so a run is reproducible and the model is recorded in the output.
+# ecmwf_ifs025 is ECMWF IFS at 0.25 degrees. Pressure-level fields are 3-hourly upstream and
+# interpolated to hourly by Open-Meteo. The grid cell nearest to each requested point is used.
+WIND_MODEL = "ecmwf_ifs025"
+
+# The API's hourly axis starts at 00:00 UTC of the current day. To cover "now" to "now + 72 h"
+# at any hour of the day, 23 + 72 = 95 hourly steps are needed, i.e. 4 whole days.
+WIND_FORECAST_DAYS = 4
+
+# Open-Meteo counts each location of a multi-location request as one call.
+# Free limits: 600 / min, 5,000 / h, 10,000 / day. One run is 546 calls; at 250 / min it takes
+# about 2 minutes and stays far below every limit, even at 4 runs a day.
+WIND_BATCH_SIZE = 50
+WIND_MAX_CALLS_PER_MIN = 250
+
+WIND_TIMEOUT_S = 60
+WIND_RETRIES = 1
+WIND_BACKOFF_S = 10.0
+
 # FIRMS: hotspots from the last 48 h. The area API takes whole days (1 to 5), so 2 days is
 # fetched and anything older than the lookback is dropped afterwards.
 FIRMS_LOOKBACK_HOURS = 48

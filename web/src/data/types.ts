@@ -69,10 +69,15 @@ export interface ZoneForecast {
   cams_pm25: Pm25Point[];
 }
 
+// ok: all data arrived. degraded: usable but incomplete, show a warning.
+// failed: no usable data, the last valid forecast is being served.
+export type SourceState = "ok" | "degraded" | "failed";
+
 export interface SourceStatus {
   name: SourceName;
-  ok: boolean;
+  state: SourceState;
   last_ok: string | null;
+  detail: string | null;
 }
 
 export interface Forecast {
