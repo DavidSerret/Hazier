@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+pipeline/.venv/
+.venv/
+build/
+dist/
+
+# Node
+node_modules/
+web/dist/
+*.log
+
+# Generated forecast (published to Pages only, never committed)
+/forecast.json
+pipeline/forecast.json
+web/public/forecast.json
+
+# Environment and editors
+.env
+.vscode/
+.DS_Store
+Thumbs.db

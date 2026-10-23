@@ -1,0 +1,15 @@
+@import "tailwindcss";
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+  background: #0b0f14;
+}
+
+/* Unlayered ID rule: maplibre-gl.css sets position: relative on the map and, being unlayered,
+   would beat Tailwind utilities, collapsing the container to zero height. */
+#map {
+  position: fixed;
+  inset: 0;
+}
