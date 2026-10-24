@@ -9,6 +9,16 @@ Hazier forecasts transboundary smoke for Malaysia and its neighbours. It splits 
 
 ## Data sources
 
+| Input | Source | Resolution | Section |
+|---|---|---|---|
+| Active fires and FRP | NASA FIRMS, VIIRS on Suomi NPP, NOAA-20 and NOAA-21, near real time | 375 m pixels, last 48 h | [Fire sources](#fire-sources) |
+| Winds at 850 hPa | ECMWF IFS open data (Open-Meteo as fallback) | 0.25 degrees, 3-hourly, past 48 h and next 72 h | [Wind field](#wind-field) |
+| PM2.5, map layer | CAMS global forecast from the Copernicus Atmosphere Data Store (Open-Meteo as fallback) | 0.4 degrees, hourly | [Map layer](#map-layer) |
+| PM2.5, zones | CAMS global forecast via Open-Meteo | 0.4 degrees, hourly, 8 points | [Zone cards](#zone-cards) |
+| Source regions | Natural Earth admin-1 outlines | simplified to about 1 km | [Source regions](#source-regions) |
+
+Licences and credits are listed in the [README](../README.md#data-sources-and-credits).
+
 ## Wind field
 
 Hazier moves smoke with the wind at a single pressure level, 850 hPa, about 1.5 km above sea level.
@@ -101,7 +111,7 @@ Even a 0.25 degree wind field misses the eddies that spread a plume sideways. Th
 σ = sqrt(2 K Δt)
 ```
 
-so the spread of a puff grows as sqrt(2 K t), the solution of the diffusion equation. The default is **K = 2 x 10⁴ m²/s**. Richardson's law, in which diffusivity grows as the 4/3 power of the eddy size (K ≈ 0.1 ε^(1/3) L^(4/3)), gives about that value for eddies the size of the grid (L ≈ 100 km) with a free-troposphere dissipation rate ε ≈ 10⁻⁴ m²/s³. It is an order-of-magnitude choice: a puff spreads to about 60 km after 24 h and 100 km after 72 h, comparable to the zone size and the grid spacing. It should be tuned against observations in phase 2.
+so the spread of a puff grows as sqrt(2 K t), the solution of the diffusion equation. The default is **K = 2 x 10⁴ m²/s**. Richardson's law, in which diffusivity grows as the 4/3 power of the eddy size (K ≈ 0.1 ε^(1/3) L^(4/3)), gives about that value for L ≈ 100 km with a free-troposphere dissipation rate ε ≈ 10⁻⁴ m²/s³. The length is the scale below which the wind field cannot be trusted to spread a plume: a global model represents features properly only over several grid lengths, about 100 km on its 0.25 degree grid (the eddies it misses are the ones the random walk stands for). It is an order-of-magnitude choice: a puff spreads to about 60 km after 24 h and 100 km after 72 h, comparable to the zone size and the grid spacing. It should be tuned against observations in phase 2.
 
 All random numbers come from one generator with a fixed seed, so identical inputs always give identical forecasts. With K = 0 the model is fully deterministic, which is how the integrator itself is tested.
 
@@ -295,6 +305,39 @@ Where CAMS shows unhealthy air, Hazier finds smoke from the fires already presen
 - **Size:** on 23 October 2026 the forecast was 707 KB (117 KB gzipped): trajectories 343 KB, the 1,500 strongest hotspots 238 KB, clusters 67 KB, CAMS grid 36 KB, zones 22 KB.
 
 ## Verification
+
+The figures below are made by `pipeline/scripts/make_figures.py` from real data (24 October 2026, t0 11:00 UTC) and the analytic test fields of the automated tests.
+
+### Numerical accuracy
+
+See [Checking the integrator](#checking-the-integrator) for the full list of tests. On a rotating wind field that strengthens in time, compared with a fine fourth-order Runge-Kutta reference, the error after 72 h is 53.6, 13.2, 3.29, 0.823, 0.206 and 0.051 km for Δt = 4, 2, 1, 0.5, 0.25 and 0.125 h: each halving divides it by 4.06, 4.01, 4.00, 4.00 and 4.00. In a uniform wind the error against the exact rhumb line falls the same way, from 4 m to 4 mm.
+
+![Convergence of the Heun integrator](figures/convergence.png)
+
+### Robustness to the removal lifetime
+
+With the same fires and winds and τ from 1 to 7 days, for the four zones the smoke reached on 24 October 2026 (Johor Bahru, Kuantan, Singapore, Kuching): every ETA stayed at t0 except Kuantan at τ = 1 day (1 h instead of 0 h); the share of the main source region varied by at most 5 points (Johor Bahru, Jambi: 59% at 1 day, 55% at 3 days, 54% at 7 days); the peak smoke index was 0.42 to 0.54 times its default value at 1 day and 1.2 to 1.45 times at 7 days. The same result as on 23 October (see [Removal](#removal)): the lifetime sets the size of the index, not the timing or the origin.
+
+![Sensitivity to the removal lifetime](figures/tau-sensitivity.png)
+
+### Two wind data paths
+
+On 24 October 2026, t0 11:00 UTC, the whole forecast was run twice: with the winds decoded from the ECMWF GRIB files on the 0.25 degree grid, and with the Open-Meteo delivery of the same model (`ecmwf_ifs025`) on the 1 degree grid. The zone tables were identical (same zones with an arrival, same main regions within 2 points) and the ETA ranges differed by at most 1 h (Kuantan 0 to 1 h against 0 to 2 h). Both carry the IFS model, so this tests the ingestion (GRIB decoding, units, wind components, cropping, time interpolation, past winds), not the weather model. Differences between models are discussed under [Wind model uncertainty](#wind-model-uncertainty). The same run on a 0.5 degree grid gave the same table, with Kuantan's range 0 to 3 h.
+
+### Comparison with CAMS
+
+The agreement flag (see [Agreement between Hazier and CAMS](#agreement-between-hazier-and-cams)) on two runs:
+
+| Run | Both elevated | Both low | Hazier only | CAMS only |
+|---|---|---|---|---|
+| 23 October 2026, 18:00 UTC | 5 | 1 | 2 (Ipoh, Kuantan) | 0 |
+| 24 October 2026, 11:00 UTC | 3 | 2 | 1 (Kuantan) | 2 (Klang Valley, Melaka / Seremban) |
+
+11 of 16 zone forecasts agree. In the `hazier_only` cases Hazier has the Jambi plume over a zone that CAMS keeps good or moderate; in the `cams_only` cases CAMS has unhealthy air without a Hazier arrival, which fits smoke older than 48 h or local pollution. Neither forecast is the truth: that needs ground stations.
+
+### Ground stations
+
+Validation against the Malaysian monitoring stations (APIMS) is in progress (phase 2).
 
 ## Limitations
 
