@@ -8,8 +8,8 @@ Status: the pipeline works end to end and writes `forecast.json`; the web app is
 
 ## How it works
 
-1. A Python pipeline downloads active fire hotspots (NASA FIRMS, VIIRS) and 850 hPa winds (Open-Meteo).
-2. It carries the smoke of each fire with the winds, from its first detection to 72 h ahead, and works out when it reaches each zone and where it comes from. It also fetches CAMS PM2.5 for the zones and the map.
+1. A Python pipeline downloads active fire hotspots (NASA FIRMS, VIIRS) and 850 hPa winds (ECMWF open data, read from the GRIB files).
+2. It carries the smoke of each fire with the winds, from its first detection to 72 h ahead, and works out when it reaches each zone and where it comes from. It also fetches CAMS PM2.5 for the zones (Open-Meteo) and the map (Copernicus Atmosphere Data Store).
 3. It writes a single `forecast.json`. The web app reads only this file.
 4. GitHub Actions runs the pipeline every 6 hours and publishes the site to GitHub Pages.
 
@@ -17,7 +17,7 @@ Times in the data are UTC. The web app displays Malaysia time (MYT).
 
 ## Stack
 
-- Pipeline: Python 3.11+, pandas, numpy (`pipeline/`)
+- Pipeline: Python 3.11+, pandas, numpy, eccodes (GRIB), ecmwf-opendata, cdsapi (`pipeline/`)
 - Web: Vite, TypeScript, MapLibre GL JS, deck.gl, Tailwind CSS (`web/`)
 - Automation: GitHub Actions and GitHub Pages
 
@@ -33,21 +33,23 @@ pip install -e ".[dev]"
 pytest
 ```
 
-Full pipeline (needs a free FIRMS MAP_KEY from https://firms.modaps.eosdis.nasa.gov/api/map_key/):
+Full pipeline (needs a free FIRMS MAP_KEY from https://firms.modaps.eosdis.nasa.gov/api/map_key/ and a free Copernicus Atmosphere Data Store token from https://ads.atmosphere.copernicus.eu/, with the licence of the CAMS global forecasts accepted on its download page):
 
 ```
 cd pipeline
-copy .env.example .env        # then put your key in .env
+copy .env.example .env        # then put FIRMS_MAP_KEY and ADS_API_KEY in .env
 .venv\Scripts\python.exe -m hazier
 ```
 
-It writes `pipeline/output/site/forecast.json` (git-ignored), appends one line to `pipeline/output/history/runs.csv` (git-ignored; on GitHub the history lives on a separate `data` branch) and prints a one-screen summary. Without cache a run takes about 5 minutes and 1,100 Open-Meteo calls; winds and the CAMS grid are cached per model run, so repeated local runs are fast. Use `--no-history` for test runs you do not want recorded. Exit codes: 0 forecast written, 1 no usable forecast (FIRMS or winds unavailable, the previous file is kept), 2 forecast failed validation (the previous file is kept).
+It writes `pipeline/output/site/forecast.json` (git-ignored), appends one line to `pipeline/output/history/runs.csv` (git-ignored; on GitHub the history lives on a separate `data` branch) and prints a one-screen summary. Without cache a run takes about 5 minutes (winds about 2 minutes, the ADS queue and download about 2 minutes) and 8 Open-Meteo calls; ECMWF steps and the ADS file are cached locally, so repeated runs are fast. If ECMWF or the ADS fail, the run falls back to Open-Meteo for that part and says so in the summary. Use `--no-history` for test runs you do not want recorded. Exit codes: 0 forecast written, 1 no usable forecast (FIRMS or winds unavailable, the previous file is kept), 2 forecast failed validation (the previous file is kept).
 
 Debug commands for single steps (from `pipeline/`):
 
 ```
 .venv\Scripts\python.exe -m hazier.sources.firms          # FIRMS hotspots per satellite
-.venv\Scripts\python.exe -m hazier.sources.winds          # 850 hPa winds, cached per model run
+.venv\Scripts\python.exe -m hazier.sources.ecmwf          # 850 hPa winds from ECMWF open data (the primary source)
+.venv\Scripts\python.exe -m hazier.sources.winds          # 850 hPa winds from Open-Meteo (the fallback)
+.venv\Scripts\python.exe -m hazier.sources.ads            # CAMS PM2.5 grid from the ADS (the map layer)
 .venv\Scripts\python.exe -m hazier.model.smoke            # full model: zone table (CAMS level, smoke ETA, origin), saves output/trajectories.png
 .venv\Scripts\python.exe -m hazier.sources.cams           # CAMS PM2.5 for the zones and the map grid (--no-grid for zones only)
 ```
@@ -70,6 +72,6 @@ Trajectories cannot resolve neighbourhoods. Phase 1 gives one forecast per zone 
 ## Credits
 
 - Active fires: NASA FIRMS
-- Air quality baseline: CAMS (Copernicus Atmosphere Monitoring Service) via Open-Meteo
-- Weather: Open-Meteo
+- Air quality baseline: CAMS (Copernicus Atmosphere Monitoring Service), from the Copernicus Atmosphere Data Store and Open-Meteo
+- Winds: ECMWF open data (CC BY 4.0); Open-Meteo as fallback
 - Basemap: CARTO, OpenStreetMap contributors

@@ -1,4 +1,12 @@
-"""Open-Meteo forecast API: winds at 850 hPa on a 1 degree grid, past 48 h and next 72 h.
+"""Winds at 850 hPa, past 48 h and next 72 h: the WindField, and the Open-Meteo fallback.
+
+fetch_winds() is the entry point. It takes the field from ECMWF open data (sources/ecmwf.py,
+native 0.25 degree grid) and falls back to the Open-Meteo forecast API on a 1 degree grid
+(fetch_openmeteo_winds(), described below) only when ECMWF fails. WindsResult.source records
+which one was used, and the output carries it (smoke_model.wind_source).
+
+Open-Meteo path
+---------------
 
 The output is a WindField: u and v arrays shaped (time, lat, lon) plus the three axes, ready
 for the trajectory model. Times are UTC and hourly. They start WIND_PAST_HOURS (48 h) before
@@ -41,7 +49,7 @@ data could not be told apart from fresh data. Incomplete data is never cached.
 Failure handling matches the other sources: fetch_winds() never raises. It returns a status
 that is ok, degraded (some grid points are missing and hold NaN) or failed (no usable field).
 
-Debug: `python -m hazier.sources.winds` runs the real fetch and prints a summary.
+Debug: `python -m hazier.sources.winds` runs the real Open-Meteo fetch and prints a summary.
 """
 
 from __future__ import annotations
@@ -55,6 +63,7 @@ import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import requests
@@ -112,6 +121,7 @@ class WindField:
     u: np.ndarray  # eastward wind m/s, shape (T, Y, X), NaN where missing
     v: np.ndarray  # northward wind m/s, shape (T, Y, X), NaN where missing
     t0_index: int = 0  # index of t0, the start of the forecast; earlier times are the past
+    source: str = "open_meteo"  # "ecmwf_open_data" or "open_meteo"
 
     @property
     def t0(self) -> np.datetime64:
@@ -243,14 +253,17 @@ class WindsResult:
     failed_batches: int = 0
     missing_points: int = 0  # grid nodes with any NaN in the output window
     from_cache: bool = False
+    source: str = "open_meteo"  # "ecmwf_open_data" or "open_meteo"
+    missing_hours: int = 0  # hours with missing values (ECMWF: past hours only)
+    note: str | None = None  # one line for the run summary
+    ecmwf: Any = None  # ecmwf.EcmwfDetail when ECMWF was tried
 
 
 # --- Grid and time axis --------------------------------------------------------------------
 
 
-def grid_axes() -> tuple[np.ndarray, np.ndarray]:
-    """Latitude and longitude axes of the wind grid, ascending."""
-    step = config.GRID_STEP_DEG
+def grid_axes(step: float = config.GRID_STEP_DEG) -> tuple[np.ndarray, np.ndarray]:
+    """Latitude and longitude axes of a regular grid over the domain, ascending."""
     lats = np.arange(config.LAT_MIN, config.LAT_MAX + step / 2, step)
     lons = np.arange(config.LON_MIN, config.LON_MAX + step / 2, step)
     return lats, lons
@@ -440,12 +453,31 @@ def _save_cache(path: Path, axis: np.ndarray, u: np.ndarray, v: np.ndarray) -> N
 # --- Public entry point --------------------------------------------------------------------
 
 
-def fetch_winds(
+def fetch_winds(now: datetime | None = None, use_cache: bool = True) -> WindsResult:
+    """The 850 hPa wind field: ECMWF open data, else Open-Meteo. Never raises."""
+    from hazier.sources.ecmwf import fetch_ecmwf_winds  # ecmwf imports this module
+
+    now = now or datetime.now(UTC)
+    primary = fetch_ecmwf_winds(now=now, use_cache=use_cache)
+    if primary.field is not None:
+        return primary
+    reason = primary.status.detail or "failed"
+    log.warning("Winds: %s; falling back to Open-Meteo", reason)
+    fallback = fetch_openmeteo_winds(now=now, use_cache=use_cache)
+    fallback.ecmwf = primary.ecmwf
+    fallback.note = f"Open-Meteo fallback ({reason})"
+    status = fallback.status
+    detail = "; ".join(x for x in (f"{reason}, Open-Meteo used", status.detail) if x)
+    fallback.status = SourceStatus(status.name, status.state, status.last_ok, detail[:200])
+    return fallback
+
+
+def fetch_openmeteo_winds(
     now: datetime | None = None,
     use_cache: bool = True,
     cache_dir: Path | None = None,
 ) -> WindsResult:
-    """Fetch the 850 hPa wind field for [now, now + 72 h]. Never raises."""
+    """Fetch the 850 hPa wind field from Open-Meteo for [now - 48 h, now + 72 h]. Never raises."""
     now = now or datetime.now(UTC)
     try:
         return _fetch_winds(now, use_cache, cache_dir or CACHE_DIR)
@@ -580,7 +612,7 @@ def main() -> int:
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     now = datetime.now(UTC)
-    result = fetch_winds(now=now, use_cache=not args.no_cache)
+    result = fetch_openmeteo_winds(now=now, use_cache=not args.no_cache)
     _report(result, now)
     return 0 if result.status.usable else 1
 

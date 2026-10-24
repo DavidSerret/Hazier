@@ -13,11 +13,14 @@ Hazier forecasts transboundary smoke for Malaysia and its neighbours. It splits 
 
 Hazier moves smoke with the wind at a single pressure level, 850 hPa, about 1.5 km above sea level.
 
-- **Source:** Open-Meteo forecast API, model `ecmwf_ifs025` (ECMWF IFS at 0.25 degrees). The model is named explicitly, never "best match", so a run is reproducible, and the model run time is recorded with the data.
-- **Grid:** 1 degree over 95 to 120 E and 8 S to 12 N, which is 21 x 26 = 546 points. Each point takes the value of the nearest 0.25 degree model cell.
-- **Time:** hourly, from 48 h before the current hour (t0) to 72 h after it, 121 steps. The past part carries the smoke emitted before t0 up to t0. Open-Meteo builds it from its archive of recent runs of the same model (`past_days=2`), so it is close to an analysis rather than a forecast. ECMWF publishes pressure-level fields every 3 h and Open-Meteo interpolates them to hourly.
-- **Cost:** one call per grid point, 546 per run, throttled over about 2 minutes. Open-Meteo counts a location as more than one call only beyond 10 variables or 2 weeks of data, so adding the past 2 days did not change the count.
-- **Components:** the API gives the wind speed and the direction the wind blows from (meteorological convention). With that direction θ measured clockwise from north:
+- **Source:** the official ECMWF open data (IFS, CC BY 4.0), read directly: the u and v components at 850 hPa from the GRIB files, through the `ecmwf-opendata` client. The files are global, but the client downloads only those two fields of each (byte ranges from the file index, about 1.2 MB per step), and they are cropped to the domain. The portal is tried first, then the official Google, Azure and AWS mirrors. The GRIB files are decoded with `eccodes`, which installs with pip on Windows and Linux alike (no system library). The source used and the model run are recorded in `forecast.json` (`smoke_model.wind_source`, `wind_run`).
+- **Grid:** the native 0.25 degrees over 95 to 120 E and 8 S to 12 N, 81 x 101 = 8,181 points. The whole field (121 hours, u and v) is about 16 MB, and the cost of a trajectory step does not depend on the grid size, so there is no reason to thin it: on 24 October 2026 a full run peaked at 233 MB of memory on the 0.25 degree grid and 221 MB on 0.5 degrees, with the same model time (about 20 s). `ECMWF_GRID_STEP_DEG` can switch to 0.5.
+- **Runs and steps:** IFS runs at 00, 06, 12 and 18 UTC, with 3-hourly steps (to 144 h for 00 and 12 UTC, 90 h for 06 and 18 UTC), and a run is published about 7 to 9 h after it starts. The forecast part, t0 to t0 + 72 h, comes from one run: the newest at least 6 h old whose steps reach t0 + 72 h. If it is not published yet, or a step fails to download, the run before it is used. A run is never used partially.
+- **Past 48 h:** the part that carries the smoke emitted before t0 up to t0 is built from earlier runs: each past 3-hourly time comes from the run that started at or just before it, as step 0 (its analysis) or step 3. If that run is missing, an older one is used with a longer step, up to 12 h. This is the closest thing to an analysis the open data offers. The portal keeps the last 12 runs, about 3 days, so the oldest time needed (about 54 h before the newest published run) is well inside it.
+- **Time:** hourly, from 48 h before the current hour (t0) to 72 h after it, 121 steps, linear in time between the 3-hourly fields. A missing past field is bridged the same way when its neighbours are at most 6 h apart; a longer gap leaves those hours missing, the particles there stop, and the wind status is *degraded* with the number of missing past hours.
+- **Fallback:** if no complete run can be read, the winds come from the Open-Meteo forecast API instead (model `ecmwf_ifs025`, the same IFS, on a 1 degree grid of 546 points, one call each, with `past_days=2` for the past). It is a last resort: on GitHub's shared runners Open-Meteo throttles hard (on 24 October 2026, 100 of the 546 points were missing after 8 minutes, which stopped trajectories early). Run at the same hour from a connection that is not throttled, both sources gave the same zone table and arrival times within 1 h.
+- **Cost:** about 42 steps in 8 downloads (one per run), about 50 MB, 2 to 4 minutes from a home connection. Each cropped step is cached locally, as a published field never changes.
+- **Components:** ECMWF gives u (eastward) and v (northward) in m/s directly. The Open-Meteo fallback gives the wind speed and the direction the wind blows from (meteorological convention). With that direction θ measured clockwise from north:
 
   ```
   u = -speed * sin(θ)    eastward component, m/s
@@ -92,7 +95,7 @@ The wind at a particle is interpolated bilinearly in space between the four surr
 
 ### Dispersion
 
-A 1 degree wind field misses the eddies that spread a plume sideways. They are represented as horizontal diffusion with a constant diffusivity K, implemented as a random walk: after each Heun step, every particle receives independent random displacements in x and y, each drawn from a normal distribution with standard deviation
+Even a 0.25 degree wind field misses the eddies that spread a plume sideways. They are represented as horizontal diffusion with a constant diffusivity K, implemented as a random walk: after each Heun step, every particle receives independent random displacements in x and y, each drawn from a normal distribution with standard deviation
 
 ```
 σ = sqrt(2 K Δt)
@@ -144,8 +147,9 @@ Lines show plume axes only. A city can receive smoke from the dispersed edge of 
 
 CAMS (the Copernicus Atmosphere Monitoring Service) already forecasts PM2.5 globally, and it is far more accurate than any index Hazier can build from fire detections and one wind level. The air quality level users see is therefore the **CAMS PM2.5 and its Malaysian API category**. Hazier does not publish a level of its own.
 
-- **Source:** the Open-Meteo air quality API, variable `pm2_5` (µg/m³ near the surface), domain `cams_global`, requested explicitly. The previous day is included for the averaging below.
-- **Resolution:** CAMS global is 0.4 degrees, about **45 km**, and 3-hourly upstream (Open-Meteo returns hourly values). A zone circle is 100 km across, so each zone is represented by about one CAMS cell. It cannot resolve a city and cannot see local sources such as traffic or a nearby fire. It is a regional forecast.
+- **Source, zone cards:** the Open-Meteo air quality API, variable `pm2_5` (µg/m³ near the surface), domain `cams_global`, requested explicitly, 8 calls a run. The previous day is included for the averaging below.
+- **Source, map layer:** the Copernicus Atmosphere Data Store (ADS), see [Map layer](#map-layer).
+- **Resolution:** CAMS global is 0.4 degrees, about **45 km**, with surface fields hourly to 90 h and 3-hourly after. A zone circle is 100 km across, so each zone is represented by about one CAMS cell. It cannot resolve a city and cannot see local sources such as traffic or a nearby fire. It is a regional forecast.
 - **What it contains:** PM2.5 from every source and of any age. Hazier's smoke contains only smoke from the fires detected in the last 48 h.
 - **Window:** the same hours as the trajectory forecast, from the current hour to 72 h ahead.
 
@@ -160,11 +164,24 @@ For each zone, from the PM2.5 at its centre:
 
 ### Map layer
 
-The map colour layer is CAMS PM2.5 on the same 1 degree grid as the winds (546 points). It uses the same trailing 24 h mean as the zone categories, so the map and the cards colour the same air the same way. `forecast.json` gets one frame every 3 h (25 frames), each value rounded to 1 µg/m³ and written as an integer, null where missing: 36 KB on 23 October 2026.
+The map colour layer is the CAMS global PM2.5 forecast at its native 0.4 degrees (51 x 63 = 3,213 points over the domain), requested from the Copernicus Atmosphere Data Store (dataset `cams-global-atmospheric-composition-forecasts`, variable `particulate_matter_2.5um`) with `cdsapi`, cropped on the server, as GRIB. It uses the same trailing 24 h mean as the zone categories, so the map and the cards colour the same air the same way. `forecast.json` gets one frame every 3 h (25 frames), each value rounded to 1 µg/m³ and written as an integer, null where missing.
+
+- **Which run:** CAMS runs at 00 and 12 UTC, guaranteed on the ADS by 10:00 and 22:00 UTC. The newest guaranteed run is requested; if it fails, the run before it.
+- **The 24 h history:** the mean at t0 needs the 23 hours before it, some of them before the run started. They come from the run 24 h earlier, in the same request: an ADS request is the cartesian product of its dates, times and lead times, so the dates D - 1 and D with the single run time HH ask for exactly the two runs. Each hour comes from the newer run when it covers it. Leads beyond 90 h are 3-hourly; those hours are linear in time.
+- **Queue:** ADS requests wait in a queue: about 1 to 2 minutes when tested on 24 October 2026 (the whole step took 116 to 133 s). The request is polled and given up after 15 minutes in total, so the workflow stays inside its timeout. Data older than 30 days is on tape and very slow, so only the last two days are ever requested.
+- **Fallback:** if the ADS fails or times out, the map layer comes from Open-Meteo on a 2 degree grid (143 calls), coarse but cheap. `pm25_grid.source` says which was used.
+- **Size:** at 0.4 degrees the layer is about 230 KB of the forecast before compression; on 24 October 2026 the whole file was 847 KB (151 KB gzipped).
 
 ### Calls to Open-Meteo
 
-Each location counts as one call. One run without cache uses 546 (winds) + 546 (CAMS grid) + 8 (CAMS zones) = **1,100 calls**, or **4,400 a day** at 4 runs. The free limits are 600 a minute, 5,000 an hour and 10,000 a day. Both grids are sent in batches of 50 and throttled to 250 calls a minute, so a run stays far under the per-minute limit and under a quarter of the daily one. During development both grids are cached per model run, so repeated runs cost only the 8 zone calls.
+Each location counts as one call. A normal run uses only the **8 zone calls**. The fallbacks add 546 (winds) and 143 (CAMS grid) when they are used. The free limits are 600 a minute, 5,000 an hour and 10,000 a day. The fallback grids are sent in batches of 50 and throttled to 250 calls a minute.
+
+### For later: fire emissions and reanalysis from the same ADS
+
+The same ADS account and licences give two datasets that phase 2 can use without a new source:
+
+- **GFAS** (Global Fire Assimilation System, `cams-global-fire-emissions-gfas`): daily fire emissions and fire radiative power on a 0.1 degree grid, from the same satellites. It could weight each source cluster by emitted PM2.5 instead of FRP, and give injection heights for a second trajectory level.
+- **EAC4** (`cams-global-reanalysis-eac4`): the CAMS reanalysis of atmospheric composition, 3-hourly from 2003 at about 0.75 degrees. A consistent reference for backtesting past haze episodes (for example August to September 2026) alongside the APIMS stations. Older data is on tape, so large requests should be planned ahead.
 
 ### Malaysian API categories
 
@@ -196,7 +213,7 @@ Hazier "expects smoke" when its smoke index reaches the arrival threshold (the z
 
 ### Attribution
 
-CAMS and Open-Meteo must be credited wherever their data is shown. `forecast.json` carries the required text and links in `attributions`, and the web info panel (the "i" button next to the timeline) must display them.
+CAMS and Open-Meteo must be credited wherever their data is shown, and ECMWF when its open data drives the winds (CC BY 4.0). `forecast.json` carries the required text and links in `attributions`, and the web info panel (the "i" button next to the timeline) displays them.
 
 ## Smoke index (internal)
 
@@ -270,11 +287,11 @@ Where CAMS shows unhealthy air, Hazier finds smoke from the fires already presen
 
 ## Pipeline run and fallback
 
-`python -m hazier` runs everything in order: FIRMS, winds, CAMS (zones and map grid), the smoke model, then the CAMS fields of each zone. The resulting forecast is checked against the schema (types, finite numbers, UTC timestamps, matching lengths, shares summing to 1) and written atomically, so a crash never leaves a half-written file.
+`python -m hazier` runs everything in order: FIRMS, winds (ECMWF open data, Open-Meteo as fallback), CAMS (zones from Open-Meteo, map grid from the ADS with Open-Meteo as fallback), the smoke model, then the CAMS fields of each zone. The run summary names the source and run of the winds and of the map layer, and the missing points of each. The resulting forecast is checked against the schema (types, finite numbers, UTC timestamps, matching lengths, shares summing to 1) and written atomically, so a crash never leaves a half-written file.
 
 - **A source fails:** the run goes on with what is available and `source_status` says so. Without CAMS the forecast is still written, without CAMS levels or map layer; the smoke timing is unaffected.
 - **No usable forecast:** without FIRMS or winds there is no smoke forecast. Nothing is written and the run exits with code 1. A forecast that fails validation is not written either (code 2). On GitHub, a failing run stops before the deploy step, and GitHub Pages keeps serving the last published `forecast.json`. This is the simplest fallback: no previous file needs to be downloaded. The web should mark a forecast as stale when `generated_at` is more than about 9 h old (one missed run plus margin).
-- **History:** every run, including failed ones, appends one line to a history CSV (`runs.csv`): run time, t0, outcome, source states, hotspot and cluster counts, and per zone the CAMS 24 h mean at t0, the smoke ETA and the main source region. About 180 bytes a line, so roughly 260 KB a year at 4 runs a day. On GitHub the workflow keeps it on a separate `data` branch, never on `main`, so `main` only holds hand-made commits; it feeds phase 2 verification, and the commits are meant to count as repository activity (see the workflow for the caveat). Locally it goes to the git-ignored `pipeline/output/history/`. The `last_ok` time of a failed source comes from it.
+- **History:** every run, including failed ones, appends one line to a history CSV (`runs.csv`): run time, t0, outcome, source states, the wind and map layer sources used, hotspot and cluster counts, and per zone the CAMS 24 h mean at t0, the smoke ETA and the main source region (empty when the smoke does not arrive: the shares then describe trace amounts below the arrival threshold, which the web does not show either). About 180 bytes a line, so roughly 260 KB a year at 4 runs a day. On GitHub the workflow keeps it on a separate `data` branch, never on `main`, so `main` only holds hand-made commits; it feeds phase 2 verification, and the commits are meant to count as repository activity (see the workflow for the caveat). Locally it goes to the git-ignored `pipeline/output/history/`. The `last_ok` time of a failed source comes from it.
 - **Size:** on 23 October 2026 the forecast was 707 KB (117 KB gzipped): trajectories 343 KB, the 1,500 strongest hotspots 238 KB, clusters 67 KB, CAMS grid 36 KB, zones 22 KB.
 
 ## Verification
@@ -283,14 +300,14 @@ Where CAMS shows unhealthy air, Hazier finds smoke from the fires already presen
 
 ### Physical assumptions of the trajectory model
 
-- **One level, no vertical motion.** All smoke moves with the 850 hPa wind. Real smoke spreads over a range of heights, and the wind changes with height (wind shear), so smoke near the ground or higher up can travel in another direction. Vertical motion is ignored: smoke rising in convection or trapped near the ground when the boundary layer collapses at night. Sea breezes and other local circulations are not captured by an 850 hPa wind on a 1 degree grid.
+- **One level, no vertical motion.** All smoke moves with the 850 hPa wind. Real smoke spreads over a range of heights, and the wind changes with height (wind shear), so smoke near the ground or higher up can travel in another direction. Vertical motion is ignored: smoke rising in convection or trapped near the ground when the boundary layer collapses at night. Sea breezes and other local circulations are not captured by an 850 hPa wind on a 0.25 degree grid.
 - **Uniform removal.** Smoke decays with one 3-day lifetime everywhere. In reality rain washes it out unevenly: fast under rain bands, hardly at all in dry spells. Wet deposition driven by forecast precipitation is planned for phase 2.
 - **Simple dispersion.** Horizontal spread uses one constant diffusivity everywhere and at all times. Real mixing varies with weather, time of day and height; the value is an order-of-magnitude estimate, not a fit to observations.
 - **Persistent fires.** Fires seen in the last 48 h are assumed to keep burning at the same strength for the next 72 h. New fires are not anticipated, and fires put out by rain keep emitting in the model.
 - **Smoke from before the first detection.** Smoke already in the air at t0 is tracked from each fire's first detection in the last 48 h. A fire is taken to start emitting when VIIRS first sees it (it may have been burning, under cloud, for longer), and smoke older than 48 h is not included. CAMS, which carries smoke of any age, remains the reference for that part.
 - **FRP as a proxy.** Summed FRP is a relative indicator of fire strength. Smouldering peat fires release a lot of smoke for little radiative power, so their contribution is probably underestimated compared with flaming surface fires.
 - **Not every hotspot is a fire.** Gas flares and other industrial heat sources are also detected. Offshore ones are excluded (see [Offshore clusters](#offshore-clusters)), but industrial heat sources on land are not.
-- **Resolution.** A 1 degree wind grid and 28 km clusters cannot resolve neighbourhoods. Phase 1 gives one forecast per zone.
+- **Resolution.** A 0.25 degree wind grid (about 28 km) and 28 km clusters cannot resolve neighbourhoods. Phase 1 gives one forecast per zone.
 
 ### Limitations of the smoke index
 

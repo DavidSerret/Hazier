@@ -9,7 +9,8 @@ from dataclasses import dataclass
 LON_MIN, LON_MAX = 95.0, 120.0
 LAT_MIN, LAT_MAX = -8.0, 12.0
 
-# Wind grid. 1 degree gives (25 + 1) * (20 + 1) = 546 points, i.e. 546 Open-Meteo calls per run.
+# Open-Meteo wind grid (the fallback wind source, see below). 1 degree gives (25 + 1) * (20 + 1)
+# = 546 points, i.e. 546 Open-Meteo calls per run.
 GRID_STEP_DEG = 1.0
 
 # Trajectory model
@@ -17,7 +18,45 @@ HORIZON_HOURS = 72
 STEP_HOURS = 1
 PRESSURE_LEVEL_HPA = 850
 
-# Winds (Open-Meteo forecast API). One global model is named explicitly, never "best_match",
+# --- Winds, primary source: ECMWF open data (sources/ecmwf.py) -----------------------------
+#
+# The official ECMWF open data: IFS at 0.25 degrees, u and v at 850 hPa, read directly from the
+# GRIB files (CC BY 4.0). Runs at 00, 06, 12 and 18 UTC, 3-hourly steps. The files are global;
+# only the u and v fields are downloaded (byte ranges, about 1.2 MB per step) and cropped to the
+# domain. The portal keeps the last 12 runs (about 3 days). Google, Azure and AWS are official
+# mirrors. The portal is tried first; AWS last, as it answers bursts of byte-range requests with
+# "SlowDown" (seen in testing, October 2026).
+ECMWF_SOURCES: tuple[str, ...] = ("ecmwf", "google", "azure", "aws")
+ECMWF_RESOL = "0p25"
+# Grid of the wind field. 0.25 is the native grid (81 x 101 points over the domain); 0.5 keeps
+# every second point. Both are small: the field is 121 hours x 8,181 points x 2 at 0.25 degrees,
+# about 16 MB in float64, and the trajectory cost does not depend on the grid size.
+ECMWF_GRID_STEP_DEG = 0.25
+ECMWF_STEP_HOURS = 3
+# A run is published about 7 to 9 hours after its start. Runs younger than this are not tried.
+ECMWF_MIN_DELAY_HOURS = 6
+# Longest step of each run (UTC hour of the run -> hours). 00 and 12 UTC go to 144 h at 3-hourly
+# steps; 06 and 18 UTC are documented as 90 h by the client and 144 h by the portal: 90 is safe.
+ECMWF_MAX_STEP_HOURS = {0: 144, 6: 90, 12: 144, 18: 90}
+# Runs tried for the forecast part, newest first. The first one with every step wins.
+ECMWF_FORECAST_RUN_TRIES = 4
+# Past winds come from the short steps of earlier runs: for a past time, the run that started at
+# or just before it (step 0 or 3), else an older run, up to this step. Beyond that it is a gap.
+ECMWF_PAST_MAX_STEP_HOURS = 12
+# Hourly values are linear in time between 3-hourly slices. Two slices further apart than this
+# (a missing slice in the past) are not bridged: those hours stay missing.
+ECMWF_MAX_BRIDGE_HOURS = 6
+# HTTP behaviour of the client (its defaults retry 500 times every 2 minutes).
+ECMWF_RETRIES = 2
+ECMWF_RETRY_AFTER_S = 10
+# Cropped fields are cached per run and step (immutable once published); older runs are pruned.
+ECMWF_CACHE_DAYS = 4
+
+# --- Winds, fallback: Open-Meteo (sources/winds.py) ----------------------------------------
+#
+# Used only when ECMWF open data fails. On GitHub's shared runners Open-Meteo throttles hard
+# (October 2026: 100 of 546 points missing after 8 minutes), so it is a last resort.
+# One global model is named explicitly, never "best_match",
 # so a run is reproducible and the model is recorded in the output.
 # ecmwf_ifs025 is ECMWF IFS at 0.25 degrees. Pressure-level fields are 3-hourly upstream and
 # interpolated to hourly by Open-Meteo. The grid cell nearest to each requested point is used.
@@ -220,8 +259,25 @@ CAMS_ELEVATED_MIN_CATEGORY = "unhealthy"
 TREND_RELATIVE = 0.15
 TREND_MIN_UGM3 = 3.0
 
-# CAMS map layer: PM2.5 on the wind grid (546 points), fetched in batches like the winds and
-# throttled to the same rate, so a run adds about 2 minutes and 546 calls.
+# CAMS map layer, primary source: the Copernicus Atmosphere Data Store (sources/ads.py).
+# The CAMS global forecast at its native 0.4 degrees (51 x 63 points over the domain), PM2.5
+# hourly to 90 h, then 3-hourly. Runs at 00 and 12 UTC, guaranteed on the ADS by 10:00 and 22:00
+# UTC. Requests wait in a queue, typically about a minute. Data older than 30 days is on tape.
+ADS_URL = "https://ads.atmosphere.copernicus.eu/api"
+ADS_KEY_ENV = "ADS_API_KEY"
+ADS_DATASET = "cams-global-atmospheric-composition-forecasts"
+ADS_VARIABLE = "particulate_matter_2.5um"
+ADS_AVAILABILITY_DELAY_HOURS = 10  # the newest run tried is the newest one guaranteed online
+ADS_RUN_TRIES = 2  # if that run fails, the one before it
+ADS_MAX_HOURLY_LEAD = 90  # leads beyond this are 3-hourly upstream
+ADS_MAX_LEAD = 120
+# The whole ADS step (queue and download, every run tried) gives up after this long and the
+# Open-Meteo fallback takes over. Sized to keep the workflow inside its timeout.
+ADS_MAX_WAIT_S = 15 * 60
+ADS_POLL_MAX_S = 20  # polling interval grows from 2 s up to this
+
+# CAMS map layer, fallback: Open-Meteo at 2 degrees (13 x 11 = 143 calls), coarse but cheap.
+CAMS_FALLBACK_GRID_STEP_DEG = 2.0
 CAMS_GRID_BATCH_SIZE = 50
 CAMS_GRID_MAX_CALLS_PER_MIN = 250
 # Exported values are rounded to this step (ug/m3) and written as integers.

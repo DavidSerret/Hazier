@@ -22,13 +22,15 @@ concurrency:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+    runs-on: ubuntu-24.04
+    # A normal run takes about 5 minutes. The ceiling covers the worst case: the ADS queue
+    # (given up after 15 minutes) plus both Open-Meteo fallbacks.
+    timeout-minutes: 45
     permissions:
       contents: write # the run history is pushed to the "data" branch (never to main)
       actions: write # keep-alive step below
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # The run history is a CSV on a separate branch called "data", so main only holds hand-made
       # commits. It is checked out into ./history as a worktree. On the very first run the branch
@@ -45,7 +47,7 @@ jobs:
             git -C history rm -rf --quiet .
           fi
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
           cache: pip
@@ -59,14 +61,18 @@ jobs:
       # failed). Every step after the history commit is then skipped, so GitHub Pages keeps
       # serving the last valid forecast; the failed run is still recorded in the history.
       # The log is kept in run.log (uploaded as an artifact) and the summary is shown on the run page.
+      # Without ADS_API_KEY the run still works: the map layer falls back to Open-Meteo at 2 degrees.
       - name: Run pipeline
         env:
-          # TODO: add the FIRMS_MAP_KEY repository secret (Settings > Secrets and variables > Actions)
           FIRMS_MAP_KEY: ${{ secrets.FIRMS_MAP_KEY }}
+          ADS_API_KEY: ${{ secrets.ADS_API_KEY }}
         run: |
           if [ -z "$FIRMS_MAP_KEY" ]; then
             echo "::error title=Missing secret::Add the FIRMS_MAP_KEY repository secret (Settings > Secrets and variables > Actions)."
             exit 1
+          fi
+          if [ -z "$ADS_API_KEY" ]; then
+            echo "::warning title=Missing secret::ADS_API_KEY is not set: the map layer will use the coarse Open-Meteo fallback."
           fi
           set -o pipefail
           python -m hazier --history history/runs.csv 2>&1 | tee run.log
@@ -112,7 +118,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: gh workflow enable forecast.yml
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 24 # the lockfile needs Node 22.12 or newer (vitest, vite)
           cache: npm
@@ -132,7 +138,7 @@ jobs:
       # Everything the run produced, to inspect without deploying. Also on failure (the log).
       - name: Upload the run output
         if: ${{ always() }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: hazier-run-${{ github.run_number }}
           path: |
@@ -145,14 +151,14 @@ jobs:
       # Only a scheduled run or a manual run with "deploy" ticked publishes the site.
       - name: Package the site for Pages
         if: ${{ github.event_name == 'schedule' || inputs.deploy }}
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@v5
         with:
           path: web/dist
 
   deploy:
     needs: build
     if: ${{ github.event_name == 'schedule' || inputs.deploy }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       pages: write
       id-token: write
@@ -161,4 +167,4 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5

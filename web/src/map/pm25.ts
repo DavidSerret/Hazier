@@ -122,23 +122,34 @@ export type Raster = {
   bounds: [number, number, number, number]; // west, south, east, north (degrees)
 };
 
+// Raster resolution: about this many pixels per degree, whatever the grid spacing (0.4 degrees
+// from the ADS, 2 from the fallback). The GPU smooths the image further when it is drawn, and
+// the per-hour images stay small enough to cache on a phone (about 190 x 150 pixels).
+const PIXELS_PER_DEGREE = 8;
+
+/** Pixels per grid cell for a grid: about PIXELS_PER_DEGREE per degree, at least 2. */
+export function pixelsPerCellFor(grid: Pm25Grid): number {
+  return Math.max(2, Math.round(PIXELS_PER_DEGREE * (grid.lons[1] - grid.lons[0])));
+}
+
 /**
  * The PM2.5 raster for a forecast hour. Each grid node is the centre of a cell of one grid
  * step, so the raster covers half a step beyond the outer nodes. Rows are spaced in Web
  * Mercator so the image lines up with the basemap. A pixel with no valid node around it is
- * transparent. The outer cell fades to transparent, so the layer has no hard edge where the
- * data ends.
+ * transparent. The outer band (about a degree) fades to transparent, so the layer has no hard
+ * edge where the data ends.
  */
 export function rasterise(
   grid: Pm25Grid,
   hour: number,
   stops: RampStop[],
-  pixelsPerCell = 8,
+  pixelsPerCell = pixelsPerCellFor(grid),
 ): Raster {
   const ny = grid.lats.length;
   const nx = grid.lons.length;
   const dy = grid.lats[1] - grid.lats[0];
   const dx = grid.lons[1] - grid.lons[0];
+  const fadePixels = Math.max(pixelsPerCell, PIXELS_PER_DEGREE);
   const west = grid.lons[0] - dx / 2;
   const east = grid.lons[nx - 1] + dx / 2;
   const south = grid.lats[0] - dy / 2;
@@ -175,7 +186,7 @@ export function rasterise(
       if (weight === 0) continue; // stays transparent
       const [r, g, b, a] = colourAt(sum / weight, stops);
       const edge = Math.min(px + 0.5, width - px - 0.5, py + 0.5, height - py - 0.5);
-      const fade = Math.min(edge / pixelsPerCell, 1);
+      const fade = Math.min(edge / fadePixels, 1);
       const o = (py * width + px) * 4;
       data[o] = r;
       data[o + 1] = g;

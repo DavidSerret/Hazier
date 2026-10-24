@@ -28,6 +28,15 @@ export const TREND_TEXT: Record<Trend, string> = {
 export type OriginRow = { region: string; percent: number };
 
 /**
+ * The origin rows to show on the card. Without an arrival (no ETA) the shares describe only
+ * trace amounts below the arrival level, so none are shown: no "main source" is suggested
+ * for a zone the smoke does not reach.
+ */
+export function originsToShow(zone: ZoneForecast): OriginRow[] {
+  return zone.smoke_eta_hours === null ? [] : originRows(zone.smoke_sources);
+}
+
+/**
  * Origin shares as whole percentages that add up to 100 (largest remainder rounding). Shares
  * under 1 % are folded into one "Other" row so the list stays short.
  */

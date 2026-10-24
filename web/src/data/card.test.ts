@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { advance, nowHour, relativeLabel, timelineTicks } from "./timeline";
 import type { ZoneForecast } from "./types";
-import { etaText, originRows } from "./zone";
+import { etaText, originRows, originsToShow } from "./zone";
 
 const zone = (over: Partial<ZoneForecast>): ZoneForecast => ({
   id: "z",
@@ -59,6 +59,19 @@ describe("etaText", () => {
   it("never says in 0 h", () => {
     const z = zone({ smoke_eta_hours: 5.4, smoke_eta_earliest_hours: 5, smoke_eta_latest_hours: 6 });
     expect(etaText(z, 4.6)).toMatch(/in (about )?1/);
+  });
+});
+
+describe("originsToShow", () => {
+  const sources = [{ region: "West Sumatra", share: 1 }];
+
+  it("hides the sources of a zone the smoke does not reach", () => {
+    expect(originsToShow(zone({ smoke_sources: sources }))).toEqual([]);
+  });
+
+  it("shows them when smoke arrives", () => {
+    const z = zone({ smoke_eta_hours: 0, smoke_sources: sources });
+    expect(originsToShow(z)).toEqual([{ region: "West Sumatra", percent: 100 }]);
   });
 });
 

@@ -5,8 +5,11 @@ quality level users see is the CAMS PM2.5 and its Malaysian API category. Hazier
 arrival time and the origin of the smoke (see model/smoke.py).
 
 This module fetches:
-- the hourly PM2.5 at the 8 zone centres, for the zone cards (category now, peak, trend);
-- the hourly PM2.5 on the 1 degree wind grid, for the map colour layer.
+- the hourly PM2.5 at the 8 zone centres from Open-Meteo, for the zone cards (category now,
+  peak, trend);
+- the hourly PM2.5 grid for the map colour layer: fetch_cams_grid() takes it from the
+  Copernicus Atmosphere Data Store at the native 0.4 degrees (sources/ads.py) and falls back to
+  Open-Meteo at 2 degrees (143 calls) only when the ADS fails.
 Both cover the same window as the trajectory forecast (the current hour to 72 h ahead).
 
 Data
@@ -21,8 +24,8 @@ Data
   results are matched to points by request order.
 - The request includes the previous day (past_days=1) so the first hours of the window have
   the history needed for the trailing mean.
-- Calls: each location counts as one call. The zones cost 8 per run; the grid 546, sent in
-  batches of 50 and throttled like the winds, and cached per CAMS run while developing.
+- Calls: each location counts as one call. The zones cost 8 per run; the fallback grid 143,
+  sent in batches of 50 and throttled like the winds, and cached per CAMS run while developing.
 
 Categories
 ----------
@@ -191,12 +194,13 @@ def trend(last_24h: float, next_24h: float) -> Trend:
 
 
 def trailing_mean(values: np.ndarray, hours: int) -> np.ndarray:
-    """Mean of each value and the hours - 1 before it. NaN where there is not enough history
-    or any of the values is missing."""
+    """Mean of each value and the hours - 1 before it, along the first axis (time), so a grid
+    shaped (time, lat, lon) works too. NaN where there is not enough history or any of the
+    values is missing."""
     values = np.asarray(values, dtype=float)
     out = np.full(values.shape, np.nan)
     if hours <= len(values):
-        windows = np.lib.stride_tricks.sliding_window_view(values, hours)
+        windows = np.lib.stride_tricks.sliding_window_view(values, hours, axis=0)
         out[hours - 1 :] = windows.mean(axis=-1)
     return out
 
@@ -232,11 +236,20 @@ class CamsGrid:
 class CamsGridResult:
     grid: CamsGrid | None
     status: SourceStatus
-    calls_used: int = 0  # retries included; 0 on a cache hit
+    calls_used: int = 0  # Open-Meteo calls, retries included; 0 on a cache hit or from the ADS
     batches: int = 0
     failed_batches: int = 0
     missing_points: int = 0
     from_cache: bool = False
+    source: str = "open_meteo"  # "ads" or "open_meteo"
+    note: str | None = None  # one line for the run summary
+    run_init: datetime | None = None  # CAMS run (ADS only)
+
+
+GRID_SOURCE_LABELS = {
+    "ads": "CAMS global via the Copernicus Atmosphere Data Store (0.4 degrees)",
+    "open_meteo": "CAMS global via Open-Meteo (2 degree fallback)",
+}
 
 
 def _floor_hour(t: datetime) -> datetime:
@@ -399,10 +412,10 @@ def fetch_cams(
 # --- The map layer -------------------------------------------------------------------------
 
 
-def _grid_cache_path(cache_dir: Path, run_init: datetime, now: datetime) -> Path:
+def _grid_cache_path(cache_dir: Path, run_init: datetime, now: datetime, step: float) -> Path:
     from hazier.sources.winds import grid_axes
 
-    lats, lons = grid_axes()
+    lats, lons = grid_axes(step)
     spec = json.dumps(
         [lats.tolist(), lons.tolist(), config.CAMS_PAST_DAYS, config.CAMS_FORECAST_DAYS]
     )
@@ -412,13 +425,35 @@ def _grid_cache_path(cache_dir: Path, run_init: datetime, now: datetime) -> Path
     return cache_dir / f"{config.CAMS_DOMAIN}_{run_init:%Y%m%dT%H%M}_{now:%Y%m%d}_{digest}.npz"
 
 
-def fetch_cams_grid(
-    now: datetime | None = None, use_cache: bool = True, cache_dir: Path | None = None
-) -> CamsGridResult:
-    """Fetch CAMS PM2.5 on the wind grid over [now, now + 72 h], for the map. Never raises."""
+def fetch_cams_grid(now: datetime | None = None, use_cache: bool = True) -> CamsGridResult:
+    """The map layer: CAMS PM2.5 from the ADS, else Open-Meteo at 2 degrees. Never raises."""
+    from hazier.sources.ads import fetch_ads_grid  # ads imports this module
+
     now = now or datetime.now(UTC)
+    primary = fetch_ads_grid(now=now, use_cache=use_cache)
+    if primary.grid is not None:
+        return primary
+    reason = primary.status.detail or "ADS failed"
+    log.warning("CAMS grid: %s; falling back to Open-Meteo", reason)
+    fallback = fetch_openmeteo_grid(now=now, use_cache=use_cache)
+    fallback.note = f"Open-Meteo fallback at {config.CAMS_FALLBACK_GRID_STEP_DEG:g} deg ({reason})"
+    status = fallback.status
+    detail = "; ".join(x for x in (f"{reason}, Open-Meteo used", status.detail) if x)
+    fallback.status = SourceStatus(status.name, status.state, status.last_ok, detail[:200])
+    return fallback
+
+
+def fetch_openmeteo_grid(
+    now: datetime | None = None,
+    use_cache: bool = True,
+    cache_dir: Path | None = None,
+    step_deg: float | None = None,
+) -> CamsGridResult:
+    """CAMS PM2.5 from Open-Meteo on a regular grid (default 2 degrees). Never raises."""
+    now = now or datetime.now(UTC)
+    step = config.CAMS_FALLBACK_GRID_STEP_DEG if step_deg is None else step_deg
     try:
-        return _fetch_grid(now, use_cache, cache_dir or CACHE_DIR)
+        return _fetch_grid(now, use_cache, cache_dir or CACHE_DIR, step)
     except CamsError as exc:
         log.error("CAMS grid failed: %s", exc)
         return CamsGridResult(None, SourceStatus("cams", "failed", None, str(exc)[:200]))
@@ -427,15 +462,15 @@ def fetch_cams_grid(
         return CamsGridResult(None, SourceStatus("cams", "failed", None, "unexpected error"))
 
 
-def _fetch_grid(now: datetime, use_cache: bool, cache_dir: Path) -> CamsGridResult:
+def _fetch_grid(now: datetime, use_cache: bool, cache_dir: Path, step: float) -> CamsGridResult:
     from hazier.sources.winds import grid_axes
 
-    lats, lons = grid_axes()
+    lats, lons = grid_axes(step)
     points = [(float(lat), float(lon)) for lat in lats for lon in lons]
     result = CamsGridResult(None, SourceStatus("cams", "failed", None))
 
     run_init = _fetch_run_init()
-    cache_file = _grid_cache_path(cache_dir, run_init, now) if run_init else None
+    cache_file = _grid_cache_path(cache_dir, run_init, now, step) if run_init else None
     cached = None
     if use_cache and cache_file and cache_file.is_file():
         try:
@@ -521,8 +556,8 @@ def _fetch_grid(now: datetime, use_cache: bool, cache_dir: Path) -> CamsGridResu
 def grid_for_export(result: CamsGridResult) -> Pm25Grid | None:
     """The map layer for forecast.json: every CAMS_EXPORT_STEP_HOURS, quantised to integers.
 
-    One frame every 3 h (the CAMS upstream step), values rounded to CAMS_GRID_QUANTUM_UGM3 and
-    written as integers, null where missing: 25 frames x 546 points.
+    One frame every 3 h, values rounded to CAMS_GRID_QUANTUM_UGM3 and written as integers, null
+    where missing: 25 frames x 3,213 points from the ADS (143 from the Open-Meteo fallback).
     """
     grid = result.grid
     if grid is None:
@@ -539,6 +574,7 @@ def grid_for_export(result: CamsGridResult) -> Pm25Grid | None:
         averaging_hours=config.PM25_AVERAGING_HOURS,
         quantum_ugm3=q,
         values=values,
+        source=GRID_SOURCE_LABELS.get(result.source, result.source),
     )
 
 

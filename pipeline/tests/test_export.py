@@ -10,7 +10,14 @@ import pytest
 from helpers import hotspot, uniform
 
 from hazier import config, export
-from hazier.schema import Forecast, SourceStatus, validate_forecast
+from hazier.schema import (
+    SCHEMA_VERSION,
+    Forecast,
+    SourceShare,
+    SourceStatus,
+    ZoneForecast,
+    validate_forecast,
+)
 from hazier.sources.cams import CamsGrid, CamsGridResult, CamsResult, CamsSeries
 from hazier.sources.firms import FirmsResult
 from hazier.sources.winds import WindsResult, grid_axes
@@ -93,7 +100,9 @@ def test_full_run_writes_a_valid_forecast(sources, tmp_path):
     report = run(tmp_path)
     assert report.exit_code == export.EXIT_OK and report.outcome == "written"
     data = load(tmp_path)
-    assert data["generated_at"] == "2026-09-14T14:00:00Z" and data["schema_version"] == 1
+    assert (
+        data["generated_at"] == "2026-09-14T14:00:00Z" and data["schema_version"] == SCHEMA_VERSION
+    )
     assert [z["id"] for z in data["zones"]] == [z.id for z in config.ZONES]
     kl = data["zones"][0]
     assert kl["smoke_eta_hours"] == 0  # smoke from 30 h before t0 is already there
@@ -289,3 +298,54 @@ def test_validator_on_the_real_pipeline_output(sources, tmp_path, monkeypatch):
         fc, trajectories=[replace(fc.trajectories[0], hours=fc.trajectories[0].hours[:-1])]
     )
     assert any("path and hours differ" in e for e in real(broken))
+
+
+# --- sources used and trace smoke ------------------------------------------------------
+
+
+def test_ecmwf_winds_are_recorded_and_credited(sources, tmp_path):
+    from hazier.sources import ecmwf
+
+    w = sources["winds"]
+    field = replace(w.field, source=ecmwf.SOURCE, run_init=datetime(2026, 9, 14, 0, tzinfo=UTC))
+    sources["winds"] = replace(w, field=field, source=ecmwf.SOURCE, calls_used=0,
+                               note="run 2026-09-14 00Z, 7 earlier runs for the past")  # fmt: skip
+    sources["grid"] = replace(sources["grid"], source="ads", calls_used=0, note="run 00Z, 0.4 deg")
+    report = run(tmp_path)
+    data = load(tmp_path)
+    model = data["smoke_model"]
+    assert model["wind_source"] == "ecmwf_open_data" and model["wind_run"] == "2026-09-14T00:00:00Z"
+    assert model["wind_grid_deg"] == 1.0  # the test field is on the 1 degree grid
+    assert {a["name"] for a in data["attributions"]} == {"CAMS", "Open-Meteo", "ECMWF"}
+    assert "Data Store" in data["pm25_grid"]["source"]
+    text = export.format_summary(report)
+    assert "run 2026-09-14 00Z, 7 earlier runs" in text and "run 00Z, 0.4 deg" in text
+    assert "missing winds 0 points, 0 past h; CAMS grid 0 points" in text
+    with (tmp_path / "history" / "runs.csv").open(encoding="utf-8", newline="") as f:
+        row = next(csv.DictReader(f))
+    assert row["wind_source"] == "ecmwf_open_data" and row["grid_source"] == "ads"
+
+
+def test_open_meteo_winds_are_recorded_without_the_ecmwf_credit(sources, tmp_path):
+    run(tmp_path)
+    data = load(tmp_path)
+    assert data["smoke_model"]["wind_source"] == "open_meteo"
+    assert "ECMWF" not in {a["name"] for a in data["attributions"]}
+
+
+def test_no_main_source_without_an_arrival():
+    zone = ZoneForecast(
+        "kl", "Klang Valley", 3.1, 101.7, 50.0, None, None, None,
+        [SourceShare("West Sumatra", 1.0)],
+    )  # fmt: skip
+    assert export.main_source(zone) == ""
+    assert export.main_source(replace(zone, smoke_eta_hours=0.0)) == "West Sumatra"
+
+
+def test_summary_and_history_hide_trace_sources(sources, tmp_path):
+    report = run(tmp_path)
+    report.zones = [replace(z, smoke_eta_hours=None, smoke_eta_earliest_hours=None,
+                            smoke_eta_latest_hours=None) for z in report.zones]  # fmt: skip
+    kl_line = next(x for x in export.format_summary(report).splitlines() if "Klang Valley" in x)
+    assert kl_line.rstrip().endswith("-") and "Riau" not in kl_line
+    assert export.history_row(report)["klang_valley_source"] == ""

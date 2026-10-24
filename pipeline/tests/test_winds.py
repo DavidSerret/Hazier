@@ -104,7 +104,7 @@ def api(monkeypatch, sleeps):
 
 
 def fetch(tmp_path, **kwargs):
-    return winds.fetch_winds(now=NOW, cache_dir=tmp_path, **kwargs)
+    return winds.fetch_openmeteo_winds(now=NOW, cache_dir=tmp_path, **kwargs)
 
 
 # --- unit conversion -------------------------------------------------------------------
@@ -295,7 +295,7 @@ def test_unexpected_exception_never_crashes(api, tmp_path):
 
 def test_time_axis_without_current_hour_fails(api, tmp_path):
     later = datetime(2026, 9, 20, 3, 0, tzinfo=UTC)
-    result = winds.fetch_winds(now=later, cache_dir=tmp_path)
+    result = winds.fetch_openmeteo_winds(now=later, cache_dir=tmp_path)
     assert result.field is None and result.status.state == "failed"
     assert "current hour" in result.status.detail
 

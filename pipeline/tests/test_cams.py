@@ -457,7 +457,7 @@ def grid_api(monkeypatch, sleeps):
 
 
 def test_grid_batches_calls_and_throttle(grid_api, tmp_path, sleeps):
-    result = cams.fetch_cams_grid(now=NOW, cache_dir=tmp_path)
+    result = cams.fetch_openmeteo_grid(step_deg=1.0, now=NOW, cache_dir=tmp_path)
     sizes = [len(p["latitude"].split(",")) for p in grid_api.requests]
     assert sizes == [50] * 10 + [46]
     assert result.calls_used == GRID_POINTS == 546 and result.batches == 11
@@ -470,7 +470,7 @@ def test_grid_batches_calls_and_throttle(grid_api, tmp_path, sleeps):
 
 
 def test_grid_shape_window_and_values(grid_api, tmp_path):
-    result = cams.fetch_cams_grid(now=NOW, cache_dir=tmp_path)
+    result = cams.fetch_openmeteo_grid(step_deg=1.0, now=NOW, cache_dir=tmp_path)
     g = result.grid
     assert result.status.state == "ok" and result.missing_points == 0
     assert g.basis.shape == g.hourly.shape == (73, 21, 26)
@@ -483,7 +483,7 @@ def test_grid_shape_window_and_values(grid_api, tmp_path):
 def test_grid_failed_batch_and_missing_points_degrade(grid_api, tmp_path):
     grid_api.failing = {3, 4}  # the third batch and its single retry
     grid_api.null_points = {(12.0, 120.0)}
-    result = cams.fetch_cams_grid(now=NOW, cache_dir=tmp_path)
+    result = cams.fetch_openmeteo_grid(step_deg=1.0, now=NOW, cache_dir=tmp_path)
     assert result.status.state == "degraded" and result.failed_batches == 1
     assert result.missing_points == 51
     assert np.isnan(result.grid.basis[:, 20, 25]).all()
@@ -492,18 +492,18 @@ def test_grid_failed_batch_and_missing_points_degrade(grid_api, tmp_path):
 
 def test_grid_all_failing_is_failed(grid_api, tmp_path):
     grid_api.failing = set(range(1, 40))
-    result = cams.fetch_cams_grid(now=NOW, cache_dir=tmp_path)
+    result = cams.fetch_openmeteo_grid(step_deg=1.0, now=NOW, cache_dir=tmp_path)
     assert result.grid is None and result.status.state == "failed"
 
 
 def test_grid_cache_avoids_calls_within_a_cams_run(grid_api, tmp_path):
-    first = cams.fetch_cams_grid(now=NOW, cache_dir=tmp_path)
+    first = cams.fetch_openmeteo_grid(step_deg=1.0, now=NOW, cache_dir=tmp_path)
     n = len(grid_api.requests)
-    second = cams.fetch_cams_grid(now=NOW, cache_dir=tmp_path)
+    second = cams.fetch_openmeteo_grid(step_deg=1.0, now=NOW, cache_dir=tmp_path)
     assert second.from_cache and second.calls_used == 0 and len(grid_api.requests) == n
     assert np.array_equal(first.grid.basis, second.grid.basis)
     grid_api.run_init += 12 * 3600  # a new CAMS run: fetch again
-    assert not cams.fetch_cams_grid(now=NOW, cache_dir=tmp_path).from_cache
+    assert not cams.fetch_openmeteo_grid(step_deg=1.0, now=NOW, cache_dir=tmp_path).from_cache
 
 
 def test_grid_unexpected_exception_never_crashes(monkeypatch, sleeps, tmp_path):
@@ -511,7 +511,7 @@ def test_grid_unexpected_exception_never_crashes(monkeypatch, sleeps, tmp_path):
         raise RuntimeError("boom")
 
     monkeypatch.setattr(cams.requests, "get", boom)
-    result = cams.fetch_cams_grid(now=NOW, cache_dir=tmp_path)
+    result = cams.fetch_openmeteo_grid(step_deg=1.0, now=NOW, cache_dir=tmp_path)
     assert result.grid is None and result.status.state == "failed"
 
 
@@ -519,7 +519,9 @@ def test_grid_export_is_quantised_and_compact(grid_api, tmp_path):
     from hazier.model.trajectories import json_size
 
     grid_api.null_points = {(12.0, 120.0)}
-    exported = cams.grid_for_export(cams.fetch_cams_grid(now=NOW, cache_dir=tmp_path))
+    exported = cams.grid_for_export(
+        cams.fetch_openmeteo_grid(step_deg=1.0, now=NOW, cache_dir=tmp_path)
+    )
     assert exported.hours == list(range(0, 73, 3))  # one frame every 3 h
     assert len(exported.values) == 25 * GRID_POINTS
     assert exported.averaging_hours == 24 and exported.quantum_ugm3 == 1.0

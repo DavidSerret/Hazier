@@ -5,7 +5,7 @@ import { CATEGORY_COLOURS, CATEGORY_LABELS, zonePointAt } from "../data/derive";
 import { formatMYT } from "../data/time";
 import { relativeLabel } from "../data/timeline";
 import type { Forecast, ZoneForecast } from "../data/types";
-import { etaText, originRows, TREND_TEXT } from "../data/zone";
+import { etaText, originsToShow, TREND_TEXT } from "../data/zone";
 import { $, el, rgb } from "./dom";
 
 let expanded = false;
@@ -69,12 +69,19 @@ function renderDetail(forecast: Forecast, zone: ZoneForecast, hour: number): voi
   const detail = $("card-detail");
   detail.replaceChildren();
 
-  // Where the smoke comes from.
+  // Where the smoke comes from. Without an arrival (no ETA) the shares only describe trace
+  // amounts below the arrival level: they are not shown, so no "source" is suggested.
   detail.append(el("h3", "text-xs font-semibold uppercase tracking-wide text-slate-400", "Smoke origin"));
-  const origins = originRows(zone.smoke_sources);
+  const origins = originsToShow(zone);
   if (origins.length === 0) {
     detail.append(
-      el("p", "mt-1 text-sm text-slate-300", "No smoke from detected fires is expected to reach this zone."),
+      el(
+        "p",
+        "mt-1 text-sm text-slate-300",
+        zone.smoke_sources.length
+          ? "No smoke arrival expected. Only trace amounts, below the arrival level, may reach this zone."
+          : "No smoke from detected fires is expected to reach this zone.",
+      ),
     );
   } else {
     const list = el("ul", "mt-1 space-y-1");

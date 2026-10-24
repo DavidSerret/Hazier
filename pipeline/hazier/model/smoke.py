@@ -300,6 +300,9 @@ def smoke_model_metadata(field: WindField) -> SmokeModel:
         past_hours=int(-field.hours[0]),
         removal_lifetime_hours=config.REMOVAL_LIFETIME_HOURS,
         arrival_threshold=config.SMOKE_ARRIVAL_THRESHOLD,
+        wind_source=field.source,
+        wind_run=f"{field.run_init:%Y-%m-%dT%H:%M:%SZ}" if field.run_init else None,
+        wind_grid_deg=round(float(field.lats[1] - field.lats[0]), 4),
     )
 
 

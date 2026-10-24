@@ -24,7 +24,8 @@ from dataclasses import asdict, dataclass, field, fields, is_dataclass
 from datetime import datetime
 from typing import Literal
 
-SCHEMA_VERSION = 1
+# 2: smoke_model.wind_source, wind_run and wind_grid_deg; pm25_grid.source.
+SCHEMA_VERSION = 2
 
 # Malaysian API categories, used for CAMS PM2.5 concentrations: the air quality shown to users.
 Pm25Category = Literal["good", "moderate", "unhealthy", "very_unhealthy", "hazardous"]
@@ -170,7 +171,7 @@ class Pm25Baseline:
 
 @dataclass
 class Pm25Grid:
-    """CAMS PM2.5 on the wind grid, for the map colour layer, quantised to stay small.
+    """CAMS PM2.5 on a regular grid, for the map colour layer, quantised to stay small.
 
     values holds one integer per (frame, lat, lon), row-major: frame first, then latitude
     (south to north), then longitude (west to east). The concentration is value * quantum_ugm3;
@@ -184,6 +185,9 @@ class Pm25Grid:
     averaging_hours: int
     quantum_ugm3: float
     values: list[int | None]
+    # Where the grid comes from, for example "CAMS global via the Copernicus Atmosphere Data
+    # Store (0.4 degrees)", or the coarser Open-Meteo fallback.
+    source: str = ""
 
 
 @dataclass
@@ -197,6 +201,9 @@ class SmokeModel:
     removal_lifetime_hours: float  # first-order removal, weights decay as exp(-age / lifetime)
     # Smoke index (internal units) at which smoke counts as arrived. Provisional.
     arrival_threshold: float
+    wind_source: str = "ecmwf_open_data"  # "ecmwf_open_data", or "open_meteo" (the fallback)
+    wind_run: str | None = None  # UTC start of the model run of the forecast part, if known
+    wind_grid_deg: float = 0.25  # spacing of the wind grid
 
 
 @dataclass

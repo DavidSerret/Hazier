@@ -2,7 +2,8 @@
 
 `python -m hazier` runs it. One run:
 
-1. FIRMS hotspots, winds (past 48 h and next 72 h), CAMS PM2.5 for the zones and the map grid.
+1. FIRMS hotspots, winds (past 48 h and next 72 h; ECMWF open data, Open-Meteo as fallback),
+   CAMS PM2.5 for the zones (Open-Meteo) and the map grid (ADS, Open-Meteo as fallback).
 2. The smoke model (model/smoke.py), then the CAMS fields of each zone.
 3. A Forecast, validated against the schema (schema.validate_forecast), written atomically to
    pipeline/output/site/forecast.json, which the workflow publishes to GitHub Pages.
@@ -50,6 +51,7 @@ from hazier.model.regions import region_names
 from hazier.model.smoke import ModelRun, fmt_eta, run_model, smoke_model_metadata
 from hazier.model.trajectories import clusters_for_export
 from hazier.schema import Forecast, Hotspot, SourceStatus, ZoneForecast, validate_forecast
+from hazier.sources import ecmwf
 from hazier.sources.cams import (
     CamsGridResult,
     CamsResult,
@@ -125,7 +127,8 @@ def build_forecast(
         zones=apply_to_zones(model.zones, cams_zones),
         smoke_model=smoke_model_metadata(field_),
         source_status=statuses,
-        attributions=attributions(),
+        attributions=attributions()
+        + ([ecmwf.attribution()] if field_.source == ecmwf.SOURCE else []),
         pm25_baseline=baseline_metadata() if cams_zones.series else None,
         pm25_grid=grid_for_export(grid),
     )
@@ -143,7 +146,8 @@ def write_atomic(path: Path, text: str) -> None:
 
 
 def history_header() -> list[str]:
-    columns = ["run_at", "t0", "outcome", *HISTORY_SOURCES, "hotspots", "clusters"]
+    columns = ["run_at", "t0", "outcome", *HISTORY_SOURCES, "wind_source", "grid_source"]
+    columns += ["hotspots", "clusters"]
     for z in config.ZONES:
         columns += [f"{z.id}_pm25", f"{z.id}_eta", f"{z.id}_source"]
     return columns
@@ -155,6 +159,8 @@ def history_row(report: RunReport) -> dict[str, str]:
         "run_at": _iso(report.run_at),
         "t0": report.t0 or "",
         "outcome": report.outcome,
+        "wind_source": report.sources.get("winds", ""),
+        "grid_source": report.sources.get("CAMS grid", ""),
         "hotspots": str(report.counts.get("hotspots", "")),
         "clusters": str(report.counts.get("clusters", "")),
     }
@@ -167,7 +173,7 @@ def history_row(report: RunReport) -> dict[str, str]:
         row[f"{zone.id}_pm25"] = f"{z.cams_now.basis_ugm3:g}" if z and z.cams_now else ""
         eta = z.smoke_eta_hours if z else None
         row[f"{zone.id}_eta"] = "" if eta is None else f"{eta:g}"
-        row[f"{zone.id}_source"] = z.smoke_sources[0].region if z and z.smoke_sources else ""
+        row[f"{zone.id}_source"] = main_source(z) if z else ""
     return row
 
 
@@ -212,6 +218,14 @@ def last_ok_from_history(path: Path) -> dict[str, str]:
     return found
 
 
+def main_source(zone: ZoneForecast) -> str:
+    """The largest smoke source of a zone, only when smoke arrives (an ETA). Without one, the
+    shares describe trace amounts below the arrival threshold, not a source of haze."""
+    if zone.smoke_eta_hours is None or not zone.smoke_sources:
+        return ""
+    return zone.smoke_sources[0].region
+
+
 # --- The run -------------------------------------------------------------------------------
 
 
@@ -229,6 +243,8 @@ class RunReport:
     zones: list[ZoneForecast] = field(default_factory=list)
     counts: dict[str, int] = field(default_factory=dict)
     calls: dict[str, int] = field(default_factory=dict)
+    sources: dict[str, str] = field(default_factory=dict)  # "winds", "CAMS grid": source used
+    source_notes: dict[str, str] = field(default_factory=dict)  # one line per source
     timings: dict[str, float] = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
     history_file: Path | None = None
@@ -273,6 +289,14 @@ def run_pipeline(
     report.counts["hotspots"] = len(firms.hotspots)
     report.calls = {"winds": winds.calls_used, "CAMS zones": cams_zones.calls_used,
                     "CAMS grid": grid.calls_used}  # fmt: skip
+    report.sources = {"winds": winds.source, "CAMS grid": grid.source}
+    report.source_notes = {
+        k: v for k, v in (("winds", winds.note), ("cams", grid.note)) if v
+    }  # fmt: skip
+    if winds.missing_hours or winds.missing_points:
+        report.counts["wind_missing_hours"] = winds.missing_hours
+        report.counts["wind_missing_points"] = winds.missing_points
+    report.counts["grid_missing_points"] = grid.missing_points
     if winds.from_cache:
         report.notes.append("winds from cache")
     if grid.from_cache:
@@ -348,6 +372,8 @@ def format_summary(r: RunReport) -> str:
         if s:
             detail = f" ({s.detail})" if s.detail else ""
             lines.append(f"  {name:<6} {s.state}{detail}")
+            if name in r.source_notes:
+                lines.append(f"         {r.source_notes[name]}")
     c = r.counts
     if "clusters" in c:
         lines.append(
@@ -363,11 +389,7 @@ def format_summary(r: RunReport) -> str:
                 else "no data"
             )
             eta = fmt_eta(z.smoke_eta_hours, z.smoke_eta_earliest_hours, z.smoke_eta_latest_hours)
-            src = (
-                f"{z.smoke_sources[0].region} {z.smoke_sources[0].share:.0%}"
-                if z.smoke_sources
-                else "-"
-            )
+            src = f"{main_source(z)} {z.smoke_sources[0].share:.0%}" if main_source(z) else "-"
             lines.append(f"  {z.name:<19}{now:<24}{z.cams_trend or '-':<11}{eta:<19}{src}")
     if r.forecast_path:
         lines.append(
@@ -381,12 +403,18 @@ def format_summary(r: RunReport) -> str:
     stages = ", ".join(f"{k} {_duration(v)}" for k, v in r.timings.items())
     lines.append(f"  time   {_duration(r.total_s)} total ({stages})")
     calls = sum(r.calls.values())
-    parts = ", ".join(f"{k} {v}" for k, v in r.calls.items())
+    parts = ", ".join(f"{k} {v}" for k, v in r.calls.items() if v)
     notes = f"; {', '.join(r.notes)}" if r.notes else ""
     lines.append(
-        f"  calls  Open-Meteo {calls:,} this run ({parts}{notes}); free limits 600/min, "
-        f"5,000/h, 10,000/day"
+        f"  calls  Open-Meteo {calls:,} this run ({parts or 'none'}{notes}); free limits "
+        f"600/min, 5,000/h, 10,000/day"
     )
+    c = r.counts
+    missing = [
+        f"winds {c.get('wind_missing_points', 0)} points, {c.get('wind_missing_hours', 0)} past h",
+        f"CAMS grid {c.get('grid_missing_points', 0)} points",
+    ]
+    lines.append(f"  missing {'; '.join(missing)}")
     return "\n".join(lines)
 
 

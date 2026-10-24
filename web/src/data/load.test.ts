@@ -57,7 +57,7 @@ describe("validateForecast", () => {
   });
 
   it("rejects an incompatible format version with a useful message", () => {
-    expect(() => validateForecast({ ...sample(), schema_version: 2 })).toThrow(/version 2/);
+    expect(() => validateForecast({ ...sample(), schema_version: 1 })).toThrow(/version 1/);
   });
 
   it("rejects a zone without coordinates", () => {

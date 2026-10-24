@@ -4,7 +4,8 @@
 // with the helpers in ./time.ts.
 // Coordinates are [lon, lat] pairs. "hours" and "hour" are offsets from generated_at.
 
-export const SCHEMA_VERSION = 1;
+// 2: smoke_model.wind_source, wind_run and wind_grid_deg; pm25_grid.source.
+export const SCHEMA_VERSION = 2;
 
 // Malaysian API categories, used for CAMS PM2.5 concentrations: the air quality shown to users.
 export type Pm25Category =
@@ -119,7 +120,7 @@ export interface Pm25Baseline {
   cams_elevated_category: Pm25Category;
 }
 
-// CAMS PM2.5 on the wind grid for the map colour layer. values is row-major (frame, lat, lon),
+// CAMS PM2.5 on a regular grid for the map colour layer. values is row-major (frame, lat, lon),
 // latitude south to north, longitude west to east; concentration = value * quantum_ugm3, null
 // = missing. Same averaging basis as the zone categories.
 export interface Pm25Grid {
@@ -129,6 +130,7 @@ export interface Pm25Grid {
   averaging_hours: number;
   quantum_ugm3: number;
   values: (number | null)[];
+  source: string; // for example "CAMS global via the Copernicus Atmosphere Data Store (0.4 degrees)"
 }
 
 // How Hazier's smoke timing and attribution were made. Not an air quality measure.
@@ -139,6 +141,9 @@ export interface SmokeModel {
   past_hours: number;
   removal_lifetime_hours: number;
   arrival_threshold: number; // internal smoke index units, provisional
+  wind_source: string; // "ecmwf_open_data", or "open_meteo" (the fallback)
+  wind_run: string | null; // UTC start of the model run of the forecast part
+  wind_grid_deg: number;
 }
 
 export interface Forecast {

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { CATEGORY_COLOURS } from "../data/derive";
 import type { Pm25Grid, Trajectory } from "../data/types";
-import { colourAt, gridAtHour, rampStops, rasterise } from "./pm25";
+import { colourAt, gridAtHour, pixelsPerCellFor, rampStops, rasterise } from "./pm25";
 import { headsAt, positionAt } from "./smoke";
 
 const stops = rampStops();
@@ -18,6 +18,7 @@ function grid(fn: (f: number, y: number, x: number) => number | null): Pm25Grid 
     averaging_hours: 24,
     quantum_ugm3: 1,
     values,
+    source: "test",
   };
 }
 
@@ -100,13 +101,21 @@ describe("rasterise", () => {
       else expect(out.data[o + 3]).toBeLessThan(expected[3] + 1);
     }
   });
-  it("fades the outer cell to transparent", () => {
-    const edge = (px: number) => r.data[(6 * r.width + px) * 4 + 3];
+  it("fades the outer band (about a degree, 8 pixels) to transparent", () => {
+    const wide = rasterise(flat, 0, stops, 8); // 24 pixels across
+    const edge = (px: number) => wide.data[(12 * wide.width + px) * 4 + 3];
     expect(edge(0)).toBeLessThan(edge(2));
     expect(edge(2)).toBeLessThan(edge(4));
-    expect(edge(4)).toBeLessThanOrEqual(edge(6));
+    expect(edge(4)).toBeLessThanOrEqual(edge(8));
     expect(edge(0)).toBeLessThan(5);
-    expect(edge(6)).toBe(colourAt(25, stops)[3]); // a full cell in: untouched
+    expect(edge(12)).toBe(colourAt(25, stops)[3]); // more than 8 pixels in: untouched
+  });
+
+  it("uses about 8 pixels per degree whatever the grid spacing", () => {
+    const fine = { ...flat, lats: [0, 0.4, 0.8], lons: [100, 100.4, 100.8] };
+    expect(pixelsPerCellFor(fine)).toBe(3);
+    expect(pixelsPerCellFor(flat)).toBe(8);
+    expect(pixelsPerCellFor({ ...flat, lons: [100, 102, 104] })).toBe(16);
   });
   it("fills a gap from its neighbours but never invents data at the edge", () => {
     const southRowMissing = grid((_f, y, _x) => (y === 0 ? null : 25));
