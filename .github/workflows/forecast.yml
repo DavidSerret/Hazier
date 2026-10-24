@@ -5,20 +5,28 @@ on:
   # schedule:
   #   - cron: "0 */6 * * *"
   workflow_dispatch:
+    inputs:
+      deploy:
+        description: "Deploy to GitHub Pages (leave off to run everything except the deploy)"
+        type: boolean
+        default: false
 
+# The job asks for what it needs; the deploy job asks for the Pages permissions.
 permissions:
-  contents: write # the run history is pushed to the "data" branch (never to main)
-  actions: write # keep-alive step below
-  pages: write
-  id-token: write
+  contents: read
 
+# One run at a time: two runs would race on the history branch. A queued run waits.
 concurrency:
-  group: pages
+  group: forecast
   cancel-in-progress: false
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write # the run history is pushed to the "data" branch (never to main)
+      actions: write # keep-alive step below
     steps:
       - uses: actions/checkout@v4
 
@@ -27,10 +35,11 @@ jobs:
       # does not exist yet: it is created as an empty orphan branch.
       - name: Check out the history branch
         run: |
-          git fetch --depth=1 origin data || true
-          if git rev-parse --verify --quiet refs/remotes/origin/data > /dev/null; then
+          if git ls-remote --exit-code --heads origin data > /dev/null; then
+            git fetch --depth=1 origin +refs/heads/data:refs/remotes/origin/data
             git worktree add -B data history origin/data
           else
+            echo "No data branch yet: starting an empty one"
             git worktree add --detach history
             git -C history checkout --orphan data
             git -C history rm -rf --quiet .
@@ -49,15 +58,33 @@ jobs:
       # Exits non-zero when no usable forecast can be made (FIRMS or winds down, or validation
       # failed). Every step after the history commit is then skipped, so GitHub Pages keeps
       # serving the last valid forecast; the failed run is still recorded in the history.
+      # The log is kept in run.log (uploaded as an artifact) and the summary is shown on the run page.
       - name: Run pipeline
         env:
           # TODO: add the FIRMS_MAP_KEY repository secret (Settings > Secrets and variables > Actions)
           FIRMS_MAP_KEY: ${{ secrets.FIRMS_MAP_KEY }}
-        run: python -m hazier --history history/runs.csv
+        run: |
+          if [ -z "$FIRMS_MAP_KEY" ]; then
+            echo "::error title=Missing secret::Add the FIRMS_MAP_KEY repository secret (Settings > Secrets and variables > Actions)."
+            exit 1
+          fi
+          set -o pipefail
+          python -m hazier --history history/runs.csv 2>&1 | tee run.log
 
-      # Runs even when the pipeline failed. A problem pushing the history must not stop the
-      # forecast from being published, hence continue-on-error (it shows as a warning).
-      # forecast.json itself is never committed.
+      - name: Show the run summary
+        if: ${{ always() && hashFiles('run.log') != '' }}
+        run: |
+          {
+            echo '### Pipeline run'
+            echo '```'
+            sed -n '/^Hazier run /,$p' run.log
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Runs even when the pipeline failed, and also on validation runs (deploy off): it is the
+      # only way to test the data branch and its push permission before launch. A problem pushing
+      # the history must not stop the forecast from being published, hence continue-on-error
+      # (it shows as a warning). forecast.json itself is never committed.
       - name: Commit run history to the data branch
         if: ${{ always() && hashFiles('history/runs.csv') != '' }}
         continue-on-error: true
@@ -75,9 +102,9 @@ jobs:
 
       # Scheduled workflows are disabled after 60 days without repository activity. GitHub does not
       # say whether a push to a branch other than the default one counts. So the cron is also kept
-      # alive explicitly: re-enabling a workflow through the API resets the inactivity timer (this is
-      # what the common "keepalive" actions do, without making commits). Not verified here: if the
-      # cron ever stops, run this workflow by hand once, which also counts as activity.
+      # alive explicitly: re-enabling a workflow through the API is what the common "keepalive"
+      # actions do, without making commits. Not verified: if the cron ever stops, run this
+      # workflow by hand once, which also counts as activity.
       - name: Keep the schedule alive
         if: ${{ always() }}
         continue-on-error: true
@@ -87,7 +114,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: lts/*
+          node-version: 24 # the lockfile needs Node 22.12 or newer (vitest, vite)
           cache: npm
           cache-dependency-path: web/package-lock.json
 
@@ -98,15 +125,37 @@ jobs:
           npm run build
 
       - name: Add forecast to site
-        run: cp pipeline/output/site/forecast.json web/dist/forecast.json
+        run: |
+          cp pipeline/output/site/forecast.json web/dist/forecast.json
+          ls -l web/dist
 
-      - uses: actions/upload-pages-artifact@v3
+      # Everything the run produced, to inspect without deploying. Also on failure (the log).
+      - name: Upload the run output
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: hazier-run-${{ github.run_number }}
+          path: |
+            pipeline/output/site/forecast.json
+            run.log
+            history/runs.csv
+          if-no-files-found: warn
+          retention-days: 14
+
+      # Only a scheduled run or a manual run with "deploy" ticked publishes the site.
+      - name: Package the site for Pages
+        if: ${{ github.event_name == 'schedule' || inputs.deploy }}
+        uses: actions/upload-pages-artifact@v3
         with:
           path: web/dist
 
   deploy:
     needs: build
+    if: ${{ github.event_name == 'schedule' || inputs.deploy }}
     runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
