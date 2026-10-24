@@ -41,7 +41,7 @@ copy .env.example .env        # then put your key in .env
 .venv\Scripts\python.exe -m hazier
 ```
 
-It writes `pipeline/output/site/forecast.json` (git-ignored), appends one line to `data/history/runs.csv` and prints a one-screen summary. Without cache a run takes about 5 minutes and 1,100 Open-Meteo calls; winds and the CAMS grid are cached per model run, so repeated local runs are fast. Use `--no-history` for test runs you do not want recorded. Exit codes: 0 forecast written, 1 no usable forecast (FIRMS or winds unavailable, the previous file is kept), 2 forecast failed validation (the previous file is kept).
+It writes `pipeline/output/site/forecast.json` (git-ignored), appends one line to `pipeline/output/history/runs.csv` (git-ignored; on GitHub the history lives on a separate `data` branch) and prints a one-screen summary. Without cache a run takes about 5 minutes and 1,100 Open-Meteo calls; winds and the CAMS grid are cached per model run, so repeated local runs are fast. Use `--no-history` for test runs you do not want recorded. Exit codes: 0 forecast written, 1 no usable forecast (FIRMS or winds unavailable, the previous file is kept), 2 forecast failed validation (the previous file is kept).
 
 Debug commands for single steps (from `pipeline/`):
 
@@ -52,13 +52,16 @@ Debug commands for single steps (from `pipeline/`):
 .venv\Scripts\python.exe -m hazier.sources.cams           # CAMS PM2.5 for the zones and the map grid (--no-grid for zones only)
 ```
 
-Web (uses `public/forecast.sample.json` until the pipeline produces real data):
+Web (from `web/`):
 
 ```
-cd web
 npm install
-npm run dev
+npm run dev        # http://localhost:5173, loads public/forecast.sample.json
+npm test           # unit tests: loading, validation, staleness, map raster
+npm run build      # typecheck and production build into dist/
 ```
+
+The dev server shows the sample forecast (made by the real model on mock data, marked "Sample data" on screen). To try the production build with a real forecast, run the pipeline, then copy `pipeline/output/site/forecast.json` into `web/dist/` (the workflow does the same) and run `npm run preview`. Add `?forecast=<url>` to any address to load another file. A forecast older than 9 hours is flagged as stale on screen.
 
 ## Limitations
 

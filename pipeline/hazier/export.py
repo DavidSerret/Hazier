@@ -6,7 +6,7 @@
 2. The smoke model (model/smoke.py), then the CAMS fields of each zone.
 3. A Forecast, validated against the schema (schema.validate_forecast), written atomically to
    pipeline/output/site/forecast.json, which the workflow publishes to GitHub Pages.
-4. One line appended to data/history/runs.csv.
+4. One line appended to the history CSV (see config.HISTORY_RELPATH).
 5. A one-screen summary.
 
 Fallback
@@ -65,9 +65,8 @@ from hazier.sources.winds import WindField, fetch_winds
 
 log = logging.getLogger(__name__)
 
-REPO_DIR = PIPELINE_DIR.parent
 OUTPUT_DIR = PIPELINE_DIR / "output" / config.OUTPUT_DIRNAME
-HISTORY_FILE = REPO_DIR / config.HISTORY_RELPATH
+HISTORY_FILE = PIPELINE_DIR / config.HISTORY_RELPATH
 
 EXIT_OK, EXIT_NO_FORECAST, EXIT_INVALID = 0, 1, 2
 HISTORY_SOURCES = ("firms", "winds", "cams")

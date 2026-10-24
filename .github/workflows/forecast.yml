@@ -7,7 +7,8 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write # the run history in data/history is committed back
+  contents: write # the run history is pushed to the "data" branch (never to main)
+  actions: write # keep-alive step below
   pages: write
   id-token: write
 
@@ -21,6 +22,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The run history is a CSV on a separate branch called "data", so main only holds hand-made
+      # commits. It is checked out into ./history as a worktree. On the very first run the branch
+      # does not exist yet: it is created as an empty orphan branch.
+      - name: Check out the history branch
+        run: |
+          git fetch --depth=1 origin data || true
+          if git rev-parse --verify --quiet refs/remotes/origin/data > /dev/null; then
+            git worktree add -B data history origin/data
+          else
+            git worktree add --detach history
+            git -C history checkout --orphan data
+            git -C history rm -rf --quiet .
+          fi
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -30,29 +45,45 @@ jobs:
       - name: Install pipeline
         run: pip install -e pipeline
 
-      # Writes pipeline/output/site/forecast.json and appends a line to data/history/runs.csv.
+      # Writes pipeline/output/site/forecast.json and appends a line to history/runs.csv.
       # Exits non-zero when no usable forecast can be made (FIRMS or winds down, or validation
-      # failed). The build and deploy steps below are then skipped, so GitHub Pages keeps
+      # failed). Every step after the history commit is then skipped, so GitHub Pages keeps
       # serving the last valid forecast; the failed run is still recorded in the history.
       - name: Run pipeline
         env:
           # TODO: add the FIRMS_MAP_KEY repository secret (Settings > Secrets and variables > Actions)
           FIRMS_MAP_KEY: ${{ secrets.FIRMS_MAP_KEY }}
-        run: python -m hazier
+        run: python -m hazier --history history/runs.csv
 
-      # Runs even when the pipeline failed: the history keeps the scheduled workflow alive
-      # (scheduled workflows are disabled after 60 days without repository activity) and
-      # records failures for verification. forecast.json itself is never committed.
-      - name: Commit run history
-        if: always()
+      # Runs even when the pipeline failed. A problem pushing the history must not stop the
+      # forecast from being published, hence continue-on-error (it shows as a warning).
+      # forecast.json itself is never committed.
+      - name: Commit run history to the data branch
+        if: ${{ always() && hashFiles('history/runs.csv') != '' }}
+        continue-on-error: true
+        working-directory: history
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add data/history/
-          if git diff --cached --quiet; then exit 0; fi
-          git commit -m "Forecast run history $(date -u +%Y-%m-%dT%H:%MZ)"
-          git pull --rebase --autostash
-          git push
+          git add runs.csv
+          if git diff --cached --quiet; then
+            echo "Nothing to commit"
+            exit 0
+          fi
+          git commit -m "Run history $(date -u +%Y-%m-%dT%H:%MZ)"
+          git push origin HEAD:data || { git pull --rebase origin data && git push origin HEAD:data; }
+
+      # Scheduled workflows are disabled after 60 days without repository activity. GitHub does not
+      # say whether a push to a branch other than the default one counts. So the cron is also kept
+      # alive explicitly: re-enabling a workflow through the API resets the inactivity timer (this is
+      # what the common "keepalive" actions do, without making commits). Not verified here: if the
+      # cron ever stops, run this workflow by hand once, which also counts as activity.
+      - name: Keep the schedule alive
+        if: ${{ always() }}
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow enable forecast.yml
 
       - uses: actions/setup-node@v4
         with:

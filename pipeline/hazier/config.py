@@ -232,9 +232,11 @@ CAMS_GRID_QUANTUM_UGM3 = 1.0
 # forecast.json goes here (pipeline/output is git-ignored); the workflow copies it into the site.
 OUTPUT_DIRNAME = "site"
 FORECAST_FILENAME = "forecast.json"
-# Light history, one CSV line per run, committed by the workflow (it keeps the scheduled
-# workflow alive and feeds phase 2 verification). Relative to the repository root.
-HISTORY_RELPATH = "data/history/runs.csv"
+# Light history, one CSV line per run. Locally it goes to this git-ignored path (relative to
+# pipeline/), so a local run can never put a file in the repository. On GitHub the workflow
+# passes --history with a path inside a checkout of the separate "data" branch and commits it
+# there, never to main (it keeps the scheduled workflow alive and feeds phase 2 verification).
+HISTORY_RELPATH = "output/history/runs.csv"
 # Raw hotspots in forecast.json: the strongest by FRP. All 15,000+ of a busy day would add
 # about 2.2 MB; the clusters, all exported, already carry the full picture.
 EXPORT_HOTSPOTS_MAX = 1500
