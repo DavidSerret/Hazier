@@ -13,14 +13,18 @@ import { headsAt } from "./smoke";
 
 export const ZONE_NAME_SIZE = 12;
 export const ZONE_NAME_SIZE_SELECTED = 14;
+// Zone markers have a fixed size on screen, whatever the zoom: a 50 km circle would cover the
+// city at high zoom. The zone's radius_km still defines the area the model looks at.
+export const ZONE_MARKER_RADIUS = 10;
+export const ZONE_MARKER_RADIUS_SELECTED = 13;
+export const ZONE_NAME_GAP = 4;
 
 export type MapState = {
   forecast: Forecast;
-  hour: number;
+  hour: number; // may be fractional while playing; data layers use the nearest whole hour
   selectedZoneId: string | null;
 };
 
-const KM_PER_DEG_LAT = 110.57;
 const TRAIL_HOURS = 10;
 
 /** Renders and remembers the PM2.5 canvases, one per forecast hour. */
@@ -101,9 +105,10 @@ export function buildLayers(
   visibleNames: Set<string> | null = null,
 ): Layer[] {
   const { forecast, hour, selectedZoneId } = state;
+  const step = Math.round(hour);
   const layers: Layer[] = [];
 
-  const image = images.get(hour);
+  const image = images.get(step);
   if (image && images.bounds) {
     layers.push(
       new BitmapLayer({
@@ -160,11 +165,10 @@ export function buildLayers(
       id: "zones",
       data: forecast.zones,
       getPosition: (z) => [z.lon, z.lat],
-      getRadius: (z) => z.radius_km * 1000,
-      radiusUnits: "meters",
-      radiusMinPixels: 11,
+      getRadius: (z) => (z.id === selectedZoneId ? ZONE_MARKER_RADIUS_SELECTED : ZONE_MARKER_RADIUS),
+      radiusUnits: "pixels",
       stroked: true,
-      getFillColor: (z) => [...zoneColourAt(forecast, z, hour), 200],
+      getFillColor: (z) => [...zoneColourAt(forecast, z, step), 235],
       getLineColor: (z) => (z.id === selectedZoneId ? [255, 255, 255, 255] : [12, 14, 18, 230]),
       getLineWidth: (z) => (z.id === selectedZoneId ? 3.5 : 1.5),
       lineWidthUnits: "pixels",
@@ -173,7 +177,8 @@ export function buildLayers(
         if (object) onSelect(object.id);
       },
       updateTriggers: {
-        getFillColor: [hour],
+        getFillColor: [step],
+        getRadius: [selectedZoneId],
         getLineColor: [selectedZoneId],
         getLineWidth: [selectedZoneId],
       },
@@ -182,12 +187,14 @@ export function buildLayers(
     new TextLayer<ZoneForecast>({
       id: "zone-names",
       data: visibleNames ? forecast.zones.filter((z) => visibleNames.has(z.id)) : forecast.zones,
-      // At the southern edge of the circle, so the name follows the circle when zooming.
-      getPosition: (z) => [z.lon, z.lat - z.radius_km / KM_PER_DEG_LAT],
+      getPosition: (z) => [z.lon, z.lat],
       getText: (z) => z.name,
       getSize: (z) => (z.id === selectedZoneId ? ZONE_NAME_SIZE_SELECTED : ZONE_NAME_SIZE),
       getColor: [255, 255, 255, 255],
-      getPixelOffset: [0, 4],
+      getPixelOffset: (z) => [
+        0,
+        (z.id === selectedZoneId ? ZONE_MARKER_RADIUS_SELECTED : ZONE_MARKER_RADIUS) + ZONE_NAME_GAP,
+      ],
       getTextAnchor: "middle",
       getAlignmentBaseline: "top",
       fontFamily: "system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif",
@@ -195,7 +202,7 @@ export function buildLayers(
       fontSettings: { sdf: true },
       outlineWidth: 3,
       outlineColor: [10, 12, 16, 235],
-      updateTriggers: { getSize: [selectedZoneId] },
+      updateTriggers: { getSize: [selectedZoneId], getPixelOffset: [selectedZoneId] },
       parameters: { depthCompare: "always" },
     }),
   );

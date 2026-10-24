@@ -196,7 +196,7 @@ Hazier "expects smoke" when its smoke index reaches the arrival threshold (the z
 
 ### Attribution
 
-CAMS and Open-Meteo must be credited wherever their data is shown. `forecast.json` carries the required text and links in `attributions`, and the web footer must display them.
+CAMS and Open-Meteo must be credited wherever their data is shown. `forecast.json` carries the required text and links in `attributions`, and the web info panel (the "i" button next to the timeline) must display them.
 
 ## Smoke index (internal)
 

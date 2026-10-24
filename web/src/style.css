@@ -2,6 +2,7 @@
 
 html,
 body {
+  color-scheme: dark; /* dark scrollbars in the side panel */
   height: 100%;
   margin: 0;
   background: #0b0f14;
@@ -12,4 +13,45 @@ body {
 #map {
   position: fixed;
   inset: 0;
+}
+
+/* Timeline slider: a fixed 16 px thumb, so the tick marks (positioned by percentage inside an
+   8 px inset) line up with the thumb centre in every browser. */
+input[type="range"] {
+  appearance: none;
+  height: 24px;
+  margin: 0;
+  background: transparent;
+  cursor: pointer;
+  touch-action: none;
+}
+input[type="range"]::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 2px;
+  background: rgb(255 255 255 / 0.25);
+}
+input[type="range"]::-moz-range-track {
+  height: 4px;
+  border-radius: 2px;
+  background: rgb(255 255 255 / 0.25);
+}
+input[type="range"]::-webkit-slider-thumb {
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  margin-top: -6px;
+  border: 2px solid #0b0f14;
+  border-radius: 50%;
+  background: #38bdf8;
+}
+input[type="range"]::-moz-range-thumb {
+  width: 12px;
+  height: 12px;
+  border: 2px solid #0b0f14;
+  border-radius: 50%;
+  background: #38bdf8;
+}
+input[type="range"]:focus-visible {
+  outline: 2px solid #38bdf8;
+  outline-offset: 2px;
 }
