@@ -554,24 +554,25 @@ def _fetch_grid(now: datetime, use_cache: bool, cache_dir: Path, step: float) ->
 
 
 def grid_for_export(result: CamsGridResult) -> Pm25Grid | None:
-    """The map layer for forecast.json: every CAMS_EXPORT_STEP_HOURS, quantised to integers.
+    """The map layer for forecast.json: hourly values, every CAMS_GRID_EXPORT_STEP_HOURS.
 
-    One frame every 3 h, values rounded to CAMS_GRID_QUANTUM_UGM3 and written as integers, null
-    where missing: 25 frames x 3,213 points from the ADS (143 from the Open-Meteo fallback).
+    The hourly value, like the main number of the zone cards (averaging_hours = 1), one frame
+    every 3 h, rounded to CAMS_GRID_QUANTUM_UGM3 and written as integers, null where missing:
+    25 frames x 3,213 points from the ADS (143 from the Open-Meteo fallback).
     """
     grid = result.grid
     if grid is None:
         return None
-    step = config.CAMS_EXPORT_STEP_HOURS // config.STEP_HOURS
+    step = config.CAMS_GRID_EXPORT_STEP_HOURS // config.STEP_HOURS
     q = config.CAMS_GRID_QUANTUM_UGM3
-    frames = grid.basis[::step]
+    frames = grid.hourly[::step]
     hours = (grid.times[::step] - grid.times[0]) / np.timedelta64(1, "h")
     values = [None if np.isnan(v) else round(float(v) / q) for v in frames.ravel()]
     return Pm25Grid(
         lats=[float(x) for x in grid.lats],
         lons=[float(x) for x in grid.lons],
         hours=[int(h) if float(h).is_integer() else float(h) for h in hours],
-        averaging_hours=config.PM25_AVERAGING_HOURS,
+        averaging_hours=1,
         quantum_ugm3=q,
         values=values,
         source=GRID_SOURCE_LABELS.get(result.source, result.source),
@@ -587,13 +588,14 @@ def _point(times: np.ndarray, series: CamsSeries, k: int) -> Pm25Point:
         value_ugm3=round(float(series.hourly[k]), 1),
         basis_ugm3=round(float(series.basis[k]), 1),
         category=pm25_category(float(series.basis[k])),
+        hourly_category=pm25_category(float(series.hourly[k])),
     )
 
 
 def apply_to_zones(zones: list[ZoneForecast], cams: CamsResult) -> list[ZoneForecast]:
     """Copies of the zone forecasts with the CAMS level now, peak, trend, series and flag.
 
-    cams_pm25 has a point every CAMS_EXPORT_STEP_HOURS (CAMS is 3-hourly upstream). The peak
+    cams_pm25 has a point every CAMS_EXPORT_STEP_HOURS (hourly). The peak
     is taken over every hour, at the hour where the category basis is highest. The trend
     compares the mean of the next 24 hourly values with the 24 h mean at t0. Zones without
     CAMS data keep empty CAMS fields and no flag.

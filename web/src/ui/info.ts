@@ -41,9 +41,11 @@ export function showInfo(forecast: Forecast | null): void {
     );
     section(
       "How to read the map",
-      "Colours show PM2.5 from the CAMS model, as a 24 h mean, in the Malaysian air quality categories. " +
-        "Glowing points are detected fires, sized by their intensity. White streaks are Hazier's estimate of where the smoke from those fires travels, " +
-        "and the arrival time on the zone card comes from them.",
+      "Coloured bands show the hourly PM2.5 forecast by CAMS, in the Malaysian air quality categories; the number in each zone circle is that hourly value. " +
+        "The official API uses a 24 h mean, which lags hours behind a change in the air: the card shows it as a second, official-style value. " +
+        "The grey haze is Hazier's estimate of the smoke from the detected fires, and the thin lines show which way it drifts. " +
+        "A grey ring around a zone means smoke aloft: the plume is over the zone at about 1.5 km and may not reach the ground. " +
+        "Orange points are detected fires; tap one for its region, strength and first detection.",
     );
     if (!verified) {
       section(

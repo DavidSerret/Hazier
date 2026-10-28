@@ -82,6 +82,18 @@ export function validateForecast(data: unknown): Forecast {
     }
     if (lats.length < 2 || lons.length < 2 || hours.length < 1) fail("pm25_grid is too small");
   }
+  const smoke = data.smoke_grid;
+  if (smoke != null) {
+    if (
+      !isObject(smoke) ||
+      !Array.isArray(smoke.lats) ||
+      !Array.isArray(smoke.lons) ||
+      !Array.isArray(smoke.hours) ||
+      typeof smoke.data !== "string"
+    ) {
+      fail("smoke_grid is incomplete");
+    }
+  }
   return data as unknown as Forecast;
 }
 

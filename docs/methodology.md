@@ -61,7 +61,19 @@ Each cluster is assigned to the province, state or country its centroid falls in
 
 ### Offshore clusters
 
-Clusters labelled "Other", that is outside every land outline and more than 25 km from the nearest one, are excluded from the model. They are almost always not vegetation fires: gas flares on offshore oil and gas fields, or volcanoes on small islands. The run logs how many were excluded and their FRP. On 23 October 2026 two clusters (84 MW, 0.05% of the total FRP) were removed: a flare at 10.4 N 108.4 E on an oil field off southern Vietnam, and Krakatau in the Sunda Strait (6.1 S 105.4 E). Industrial heat sources on land are not removed by this rule.
+Clusters labelled "Other", that is outside every land outline and more than 25 km from the nearest one, are excluded from the model. They are almost always not vegetation fires: gas flares on offshore oil and gas fields, or volcanoes on small islands. The run logs how many were excluded and their FRP. On 23 October 2026 two clusters (84 MW, 0.05% of the total FRP) were removed: a flare at 10.4 N 108.4 E on an oil field off southern Vietnam, and Krakatau in the Sunda Strait (6.1 S 105.4 E). Industrial heat sources on land are not removed by this rule; see the next section.
+
+### Static heat sources on land
+
+VIIRS also detects gas flares on land, power plants, cement and steel works, palm oil mill boilers and active volcanoes. Their heat says nothing about biomass smoke, and since they burn every day they would become fires that never go out. The near-real-time data Hazier reads has no field to tell them apart, but NASA's standard-processing archive does: each archived detection has a **type**, 0 presumed vegetation fire, 1 active volcano, 2 other static land source, 3 offshore.
+
+`pipeline/scripts/build_static_sources.py` downloads two years of archive (July 2024 to June 2026, S-NPP and NOAA-20, 447,722 detections in the domain) and keeps every 0.004 degree cell (about 440 m) with at least two detections of type 1 or 2: **678 cells, 631 static land sources and 47 volcano cells**, in `pipeline/hazier/data/static_sources.json` (19 KB). Before clustering, a hotspot within one cell of them is dropped, which covers the 375 m pixel and its geolocation error. The run logs the count and FRP, like the offshore rule.
+
+**A persistence rule was tested and rejected.** The archive ends about four months before today, so a source built since would be missed. The obvious complement is persistence: a cell detected on many days across many months. Scored against the archive's own labels over a year, no threshold was precise enough: even cells seen on 30 or more days in 10 or more distinct months were labelled static by NASA in only 70% of cases (recall 21%). The other 30% may be unlisted mills, or fields burned again and again. Excluding them would risk deleting real fires, which is worse than keeping a chimney, so the script only uses persistence above 90% precision and, on these data, does not use it at all.
+
+**The suspect cluster near 99.2 E 0.3 N.** A small cluster on the west coast of Sumatra (West Sumatra, Pasaman Barat) appeared in several consecutive runs and was the only source of the trace smoke over Klang Valley on 24 October 2026. The archive labels its detections as vegetation fires (type 0); they are scattered over a few kilometres, on four to six days per cell over 18 months, in 5 of 18 months, and the last detection was on 23 October. It looked daily because one detection stays in the 48 h lookback of three consecutive daily runs. It is a recurrent fire site, not a static source, so the mask keeps it. What changed is how much it weighs on the map: the flow lines now follow smoke amount (see [Output for the web](#output-for-the-web)), and a trace below the arrival threshold names no source.
+
+Rebuild the mask every few months, as the archive grows.
 
 ### Particle release
 
@@ -144,14 +156,13 @@ The automated tests check the model against known answers:
 
 ### Output for the web
 
-`forecast.json` gets at most 300 display trajectories, so the web stays light. Showing only the strongest clusters would hide what matters most to a reader, a small fire whose smoke heads for their city, so they are chosen in two passes:
+The map shows the smoke itself with the [smoke density grid](#smoke-density-grid); the trajectories are only a few flow lines that show which way it drifts. `forecast.json` gets at most **60**, shared between clusters **in proportion to the smoke they emit** (the summed weight of their releases), by largest remainder: the large fire complexes get most lines and a fire carrying less than about 1/120 of the smoke gets none, however close it is to a city. Within a cluster the lines are spread evenly over its release times. The selection is deterministic.
 
-1. **Near-zone lines first:** tracers passing within 50 km of a zone's edge. Zones take turns, so a zone reached only by a small fire still gets its lines, and within each zone the clusters that bring it the most smoke come first. This pass takes at most 60% of the cap.
-2. **Regional context:** the rest of the cap is a random sample of the other tracers, weighted by their FRP.
+An earlier version gave priority to lines passing near zones, so that a small fire heading for a city would always be visible. It over-represented small sources: on 24 October 2026 a single small cluster on the west coast of Sumatra drew most of the lines towards Klang Valley while carrying a trace of smoke. Proximity is now left to the smoke grid and the source breakdown.
 
-Coordinates are rounded to 0.01 degrees (about 1.1 km). On 23 October 2026 this gave 300 trajectories, 180 of them near zones, for 344 KB, plus 66 KB for the 408 clusters, before compression.
+Each line keeps its release hour and the smoke its release carries, so the web draws it with an opacity that follows the smoke left after removal, weight x exp(-age / τ), and shows only its last 6 hours behind the moving head. Coordinates are rounded to 0.01 degrees (about 1.1 km).
 
-Lines show plume axes only. A city can receive smoke from the dispersed edge of a plume whose axis passes 100 km away; that smoke counts in its arrival time and its source breakdown, but no line is drawn to it. In a forecast-only run on 23 October 2026, most of Singapore's smoke came from Jambi through dispersion, while most lines near Singapore came from a West Sumatra cluster whose axis crossed the city. The source breakdown, not the lines, is the reference.
+Lines show plume axes only. A city can receive smoke from the dispersed edge of a plume whose axis passes 100 km away; that smoke counts in its arrival time, its source breakdown and the smoke grid, but no line is drawn to it. The source breakdown, not the lines, is the reference.
 
 ## Air quality shown to users: CAMS
 
@@ -167,14 +178,15 @@ CAMS (the Copernicus Atmosphere Monitoring Service) already forecasts PM2.5 glob
 
 For each zone, from the PM2.5 at its centre:
 
-- **Now:** the category at t0, the level to show on the card.
-- **Peak:** the hour of the highest category basis in the next 72 h.
+- **Main number: the hourly PM2.5.** It follows the air as it changes. The 24 h mean, which the official API uses, lags hours behind: on 25 October 2026 at 03:00 UTC CAMS had 12.8 µg/m³ over Klang Valley for the hour while the 24 h mean still read 38.3 (unhealthy), and a station network reported a drop from about 90 to 6 µg/m³ within a few hours the same day. The hourly value is coloured with the same Malaysian category limits (`hourly_category`). Those limits are defined for the 24 h mean, so the hourly colour is an indication, said so on the card.
+- **Secondary: the official-style value**, the 24 h mean and its category, as the Department of Environment computes the API.
+- **Peak:** the hour of the highest 24 h mean in the next 72 h; the card also names the highest hourly value.
 - **Trend:** the mean over the next 24 h against the mean over the last 24 h. *Worsening* or *improving* when it changes by more than 15% of the last mean and by at least 3 µg/m³, otherwise *stable*, so small changes on clean days do not flip the card.
-- **Series:** one point every 3 h (the upstream resolution), each with the hourly value and the 24 h mean its category is based on.
+- **Series:** one point every hour, each with the hourly value, its category, and the 24 h mean and its category.
 
 ### Map layer
 
-The map colour layer is the CAMS global PM2.5 forecast at its native 0.4 degrees (51 x 63 = 3,213 points over the domain), requested from the Copernicus Atmosphere Data Store (dataset `cams-global-atmospheric-composition-forecasts`, variable `particulate_matter_2.5um`) with `cdsapi`, cropped on the server, as GRIB. It uses the same trailing 24 h mean as the zone categories, so the map and the cards colour the same air the same way. `forecast.json` gets one frame every 3 h (25 frames), each value rounded to 1 µg/m³ and written as an integer, null where missing.
+The map colour layer is the CAMS global PM2.5 forecast at its native 0.4 degrees (51 x 63 = 3,213 points over the domain), requested from the Copernicus Atmosphere Data Store (dataset `cams-global-atmospheric-composition-forecasts`, variable `particulate_matter_2.5um`) with `cdsapi`, cropped on the server, as GRIB. It shows the **hourly** value, like the main number of the zone cards, in **discrete category bands**: every pixel takes the colour of its category, with no blending between categories, so each colour on the map reads as exactly one category. `forecast.json` gets one frame every 3 h (25 frames; the web interpolates in between), each value rounded to 1 µg/m³ and written as an integer, null where missing.
 
 - **Which run:** CAMS runs at 00 and 12 UTC, guaranteed on the ADS by 10:00 and 22:00 UTC. The newest guaranteed run is requested; if it fails, the run before it.
 - **The 24 h history:** the mean at t0 needs the 23 hours before it, some of them before the run started. They come from the run 24 h earlier, in the same request: an ADS request is the cartesian product of its dates, times and lead times, so the dates D - 1 and D with the single run time HH ask for exactly the two runs. Each hour comes from the newer run when it covers it. Leads beyond 90 h are 3-hourly; those hours are linear in time.
@@ -261,6 +273,20 @@ Sensitivity on 23 October 2026 (t0 18:00 UTC): peak smoke index, ETA and main so
 | Kuching | 348, at t0, Central Kalimantan 69% | 437, at t0, Central Kalimantan 70% | 531, at t0, Central Kalimantan 72% |
 
 The lifetime changes the size of the index by about a quarter either way, but hardly changes what users see from Hazier: the ETAs move by at most 1 h, and the source breakdown by at most 2 to 4 points. Without removal the same peaks were roughly 75% higher than with τ = 3 days (Klang Valley 227 against 127 in an earlier run the same day).
+
+### Smoke density grid
+
+For the map, the same particles are also summed on a coarse grid at every forecast hour: the smoke (weight after removal) inside each 0.5 degree cell (about 55 km, the spread of a puff after a day of travel; a finer grid would show particle noise). Spread over the area of a zone instead of the cell, it reads in the units of a zone's smoke index:
+
+```
+index = load x (π x 50 km²) / cell area
+```
+
+so the arrival threshold means the same on the map as on the card. Each value is written in one byte on a log scale (0 below 1, a tenth of the threshold, then 40 steps per factor of ten, about 6% per step) and the 73 hourly frames are base64 encoded: 146,000 bytes, about 195 KB of text that compresses well because most cells are empty. The web draws it as a soft grey translucent haze, cross-fading between hours, deliberately unlike the CAMS colour bands: it is Hazier's smoke at 850 hPa, not a ground concentration.
+
+### Smoke aloft
+
+Each zone also gets its smoke index for every forecast hour (`smoke_index`). When it is at or above the arrival threshold, the web draws a grey ring around the zone marker and the card says **smoke aloft**: the particles travel at 850 hPa, about 1.5 km up, and whether the plume mixes down to the ground depends on the boundary layer, which Hazier does not model. The ground-level number remains CAMS.
 
 ## Time of arrival (ETA)
 

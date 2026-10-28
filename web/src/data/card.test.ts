@@ -18,6 +18,7 @@ const zone = (over: Partial<ZoneForecast>): ZoneForecast => ({
   cams_trend: null,
   cams_pm25: [],
   agreement: null,
+  smoke_index: [],
   ...over,
 });
 

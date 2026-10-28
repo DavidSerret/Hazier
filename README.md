@@ -6,6 +6,8 @@
 
 *Forecast of 24 October 2026, 11:00 UTC. Yellow dots are fire clusters detected by satellite, sized by their radiative power. Lavender lines and shading are the smoke they release, carried by the 850 hPa winds over the next 72 hours. Circles are the forecast zones, coloured by their current air quality category.*
 
+**Live forecast: [davidserret.github.io/Hazier](https://davidserret.github.io/Hazier/)**, updated every 6 hours.
+
 The physics, parameter choices and test results are documented in full in **[docs/methodology.md](docs/methodology.md)**. This page is the overview.
 
 ---
@@ -35,7 +37,7 @@ What CAMS does not say is **where the smoke over a city comes from** and **when 
 
 - the **arrival time** of the smoke ("smoke expected in 4 to 6 h", or "already present");
 - the **origin** of that smoke by province (for example "Jambi 55%, South Sumatra 26%");
-- the **CAMS PM2.5** level now and over the next 72 hours.
+- the **CAMS PM2.5** for every hour of the next 72, as the main number, because the 24 hour mean of the official API lags hours behind a change in the air; the 24 hour mean category is shown next to it as the official-style value.
 
 The zones are Klang Valley (Kuala Lumpur, Selangor and Putrajaya), Johor Bahru, Melaka and Seremban, Ipoh, Penang, Kuantan, Singapore and Kuching, each a circle of about 50 km radius.
 
@@ -64,7 +66,7 @@ Each step below is kept deliberately simple and documented, so the forecast can 
 
 The **VIIRS** instrument, on three polar-orbiting satellites (Suomi NPP, NOAA-20 and NOAA-21), sees active fires as hot pixels about **375 m** across, each passing over the region roughly twice a day. NASA's FIRMS service delivers these detections within hours. Each comes with its **fire radiative power (FRP)**, in megawatts: the rate at which the fire radiates heat, which grows with the rate at which vegetation burns, and so with the smoke it emits.
 
-In October 2026 the region produced between 9,000 and 16,000 detections in 48 hours. Low-confidence detections are dropped, duplicates seen by two satellites minutes apart are merged, and the rest are grouped into **clusters** on a 0.25 degree grid (about 28 km). Each cluster releases its smoke from the FRP-weighted centre of its hotspots, with a strength equal to its summed FRP. Weak clusters (below 25 MW) and offshore heat sources such as gas flares are left out. [Details](docs/methodology.md#fire-sources)
+In October 2026 the region produced between 9,000 and 16,000 detections in 48 hours. Low-confidence detections are dropped, duplicates seen by two satellites minutes apart are merged, and the rest are grouped into **clusters** on a 0.25 degree grid (about 28 km). Each cluster releases its smoke from the FRP-weighted centre of its hotspots, with a strength equal to its summed FRP. Weak clusters (below 25 MW) are left out, and so are heat sources that are not vegetation fires: gas flares, power plants, mills and volcanoes. On land they are recognised with NASA's own classification of its archived detections (static land sources and volcanoes, 678 locations in the domain over two years); offshore, by their distance from land. [Details](docs/methodology.md#fire-sources)
 
 ### Advection at 850 hPa
 
@@ -116,7 +118,9 @@ When a forecast starts, the smoke of the last two days is already over the regio
 
 For each zone, Hazier sums the smoke of all particles within 50 km of its centre, after removal, into an internal **smoke index**. It is a relative measure of smoke, used only for timing and origin, never shown as air quality. The **ETA** (estimated time of arrival) is the first forecast hour at which the index reaches an arrival threshold. Because dispersion spreads the arrival of a plume over several hours, a range is given too: from the hour the index reaches half the threshold to the hour it reaches twice it.
 
-The **attribution** splits the smoke a zone receives over the 72 hours by the province or state of the fires it came from, using Natural Earth outlines, so the shares always add up to 100%. When the smoke does not reach a zone, no source is shown: trace amounts below the threshold are not presented as a cause. [Details](docs/methodology.md#time-of-arrival-eta)
+The **attribution** splits the smoke a zone receives over the 72 hours by the province or state of the fires it came from, using Natural Earth outlines, so the shares always add up to 100%. When the smoke does not reach a zone, no source is shown: trace amounts below the threshold are not presented as a cause.
+
+On the map, the same particles are summed hour by hour on a coarse grid and drawn as a soft grey haze, and a zone whose smoke index is above the threshold at that hour gets a grey ring and a **"smoke aloft"** label: the particles travel at about 1.5 km, and whether the plume mixes down to the ground is not modelled. The number in the zone marker stays the CAMS ground-level PM2.5. [Details](docs/methodology.md#time-of-arrival-eta)
 
 ![CAMS PM2.5 over 72 hours for Johor Bahru with the Hazier smoke arrival marked](docs/figures/zone-example.png)
 
@@ -233,12 +237,26 @@ Single steps, for debugging (from `pipeline/`):
 npm install
 npm run dev        # http://localhost:5173, shows a sample forecast
 npm test
-npm run build      # then copy pipeline/output/site/forecast.json into web/dist/ and run: npm run preview
+npm run build
 ```
+
+**Preview with real, fresh data.** One command, from `web/`, on Windows, Linux or macOS, once the pipeline environment and keys above are set up:
+
+```
+npm run preview:live
+```
+
+It runs the pipeline with `pipeline/.venv` (without adding a line to the run history), builds the app, copies the new `forecast.json` into the built site and starts the preview server, printing its local URL (usually http://localhost:4173/). If the pipeline fails, it stops with the reason and serves nothing. To restart quickly with the last forecast, without running the pipeline again:
+
+```
+npm run preview:live -- --skip-pipeline
+```
+
+The app flags a forecast older than 9 hours as stale, so a reused one may show that warning.
 
 ## Roadmap
 
-**Phase 1, the first public version.** Fire ingestion, ECMWF winds, the trajectory model, arrival times and attribution, CAMS levels, the web app with its map, timeline and zone cards, and the automation are done, and the full run is validated on GitHub. Next: visual polish, then the public launch, when the six-hourly schedule starts.
+**Phase 1, the first public version.** Fire ingestion, ECMWF winds, the trajectory model, arrival times and attribution, CAMS levels, the web app with its map, timeline and zone cards, and the six-hourly automation are done, and the site is live. Next: visual polish.
 
 **Phase 2, a verified product.**
 - Readings from the Malaysian monitoring stations (APIMS), kept as a history, and verification of Hazier and CAMS against them, with the scores shown in the app.

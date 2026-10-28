@@ -1,19 +1,18 @@
-// The CAMS PM2.5 colour layer: a smooth raster made from the 1 degree grid.
+// The CAMS PM2.5 colour layer: a raster of discrete Malaysian API category bands.
 //
 // Pure functions (no DOM) so they can be tested; layers.ts turns the result into a canvas.
 //
-// The grid holds the trailing 24 h mean, the same basis as the zone categories, so the map and
-// the cards colour the same air the same way. For a forecast hour the two nearest 3-hourly
-// frames are mixed linearly, then the 21 x 26 nodes are interpolated bilinearly to a finer
-// raster. Colour comes from a ramp that sits exactly on each category colour at the middle of
-// the category's band and blends linearly in between, so the map is smooth but every colour
-// is recognisably a Malaysian API category.
+// The grid holds the hourly value, like the main number of the zone cards. For a forecast hour
+// the two nearest 3-hourly frames are mixed linearly, the nodes are interpolated bilinearly to
+// a finer raster, and each pixel takes the colour of its category band: no blending between
+// categories, so every colour on the map reads as exactly one category, with crisp edges
+// where the air crosses a limit.
 
 import type { Pm25Category, Pm25Grid } from "../data/types";
 import { CATEGORY_COLOURS, CATEGORY_ORDER, type Rgb } from "../data/derive";
 
 type Bounds = Partial<Record<Pm25Category, number | null>>;
-export type RampStop = { value: number; colour: Rgb };
+export type Band = { upper: number; colour: Rgb; alpha: number };
 
 // Used when forecast.json has no pm25_baseline (CAMS zones failed but the grid worked).
 const FALLBACK_BOUNDS: Bounds = {
@@ -24,67 +23,33 @@ const FALLBACK_BOUNDS: Bounds = {
   hazardous: null,
 };
 
-/** Ramp stops at the middle of each category band (the open last band gets 1.2 x its start). */
-export function rampStops(bounds: Bounds = FALLBACK_BOUNDS): RampStop[] {
-  const stops: RampStop[] = [];
-  let lower = 0;
-  for (const category of CATEGORY_ORDER) {
-    const upper = bounds[category];
-    const centre = upper == null ? lower * 1.2 : (lower + upper) / 2;
-    stops.push({ value: centre, colour: CATEGORY_COLOURS[category] });
-    if (upper != null) lower = upper;
-  }
-  stops[0] = { value: 0, colour: stops[0].colour }; // clean air starts at 0 with the first colour
-  return stops;
-}
+// Opacity of each band (0 to 255): clean air barely tints the basemap, haze is clearly visible,
+// and none of it hides the labels underneath.
+const BAND_ALPHA: Record<Pm25Category, number> = {
+  good: 34,
+  moderate: 78,
+  unhealthy: 125,
+  very_unhealthy: 160,
+  hazardous: 185,
+};
 
-// Opacity by concentration (0 to 255): clean air barely tints the basemap, haze is clearly
-// visible, and none of it hides the labels underneath.
-const ALPHA_STOPS: [number, number][] = [
-  [0, 22],
-  [15, 58],
-  [35, 120],
-  [75, 165],
-  [250, 190],
-];
+/** The category bands from their upper bounds (the last one is open ended). */
+export function bandsFrom(bounds: Bounds = FALLBACK_BOUNDS): Band[] {
+  return CATEGORY_ORDER.map((category) => ({
+    upper: bounds[category] ?? Infinity,
+    colour: CATEGORY_COLOURS[category],
+    alpha: BAND_ALPHA[category],
+  }));
+}
 
 function lerp(a: number, b: number, t: number): number {
   return a + (b - a) * t;
 }
 
-function alphaAt(value: number): number {
-  const last = ALPHA_STOPS[ALPHA_STOPS.length - 1];
-  if (value >= last[0]) return last[1];
-  for (let i = 1; i < ALPHA_STOPS.length; i++) {
-    const [v1, a1] = ALPHA_STOPS[i];
-    if (value <= v1) {
-      const [v0, a0] = ALPHA_STOPS[i - 1];
-      return lerp(a0, a1, (value - v0) / (v1 - v0));
-    }
-  }
-  return last[1];
-}
-
-/** [r, g, b, a] (0 to 255) of a concentration in µg/m³. */
-export function colourAt(value: number, stops: RampStop[]): [number, number, number, number] {
-  const a = Math.round(alphaAt(value));
-  if (value <= stops[0].value) return [...stops[0].colour, a];
-  const last = stops[stops.length - 1];
-  if (value >= last.value) return [...last.colour, a];
-  for (let i = 1; i < stops.length; i++) {
-    if (value <= stops[i].value) {
-      const s0 = stops[i - 1];
-      const s1 = stops[i];
-      const t = (value - s0.value) / (s1.value - s0.value);
-      return [
-        Math.round(lerp(s0.colour[0], s1.colour[0], t)),
-        Math.round(lerp(s0.colour[1], s1.colour[1], t)),
-        Math.round(lerp(s0.colour[2], s1.colour[2], t)),
-        a,
-      ];
-    }
-  }
-  return [...last.colour, a];
+/** [r, g, b, a] (0 to 255) of a concentration in µg/m³: the colour of its band. */
+export function colourAt(value: number, bands: Band[]): [number, number, number, number] {
+  const band = bands.find((b) => value <= b.upper) ?? bands[bands.length - 1];
+  return [...band.colour, band.alpha];
 }
 
 /** The grid at a forecast hour, in µg/m³ row-major (lat, lon); NaN where missing. */
@@ -142,7 +107,7 @@ export function pixelsPerCellFor(grid: Pm25Grid): number {
 export function rasterise(
   grid: Pm25Grid,
   hour: number,
-  stops: RampStop[],
+  bands: Band[],
   pixelsPerCell = pixelsPerCellFor(grid),
 ): Raster {
   const ny = grid.lats.length;
@@ -184,7 +149,7 @@ export function rasterise(
         }
       }
       if (weight === 0) continue; // stays transparent
-      const [r, g, b, a] = colourAt(sum / weight, stops);
+      const [r, g, b, a] = colourAt(sum / weight, bands);
       const edge = Math.min(px + 0.5, width - px - 0.5, py + 0.5, height - py - 0.5);
       const fade = Math.min(edge / fadePixels, 1);
       const o = (py * width + px) * 4;

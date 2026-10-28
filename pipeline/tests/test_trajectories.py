@@ -1,6 +1,6 @@
 import json
 import math
-from dataclasses import asdict
+from dataclasses import asdict, replace
 
 import numpy as np
 import pytest
@@ -400,49 +400,45 @@ def test_dispersed_particles_never_hold_nan():
 
 # --- export selection ------------------------------------------------------------------
 
-SINGAPORE = config.Zone("singapore", "Singapore", 1.35, 103.82)
-KUCHING = config.Zone("kuching", "Kuching", 1.55, 110.36)
-
 
 def tracers_for(clusters, field):
     return tj.trace(field, tj.release_particles(clusters, particles_per_release=1))
 
 
-def test_selection_keeps_a_small_cluster_that_reaches_a_zone():
+def test_allocate_lines_is_proportional_and_sums_to_the_cap():
+    assert tj.allocate_lines(np.array([700.0, 200.0, 100.0]), 10).tolist() == [7, 2, 1]
+    assert tj.allocate_lines(np.array([1000.0, 10.0]), 10).tolist() == [10, 0]
+    assert tj.allocate_lines(np.array([0.0, 0.0]), 10).tolist() == [0, 0]
+    lines = tj.allocate_lines(np.array([5.0, 3.0, 2.0, 1.0]), 7)
+    assert lines.sum() == 7 and list(lines) == sorted(lines, reverse=True)
+
+
+def test_lines_follow_smoke_amount_not_proximity():
     # A huge fire far from every zone and a small one just south of Singapore, wind northward.
+    # The small fire carries 0.3% of the smoke: it gets no line, however close to the city.
     clusters = [cluster(0, -6.0, 115.0, 10000.0, "Big"), cluster(1, 0.5, 103.82, 30.0, "Small")]
-    tracers = tracers_for(clusters, uniform(0.0, 3.0))
-    sel = tj.select_for_export(tracers, clusters, (SINGAPORE,), max_trajectories=20,
-                               priority_share=0.5)  # fmt: skip
+    sel = tj.select_for_export(
+        tracers_for(clusters, uniform(0.0, 3.0)), clusters, max_trajectories=20
+    )
     ids = [t.cluster_id for t in sel.trajectories]
-    assert len(ids) == 20 and sel.near_zone == 10
-    assert ids.count(1) >= 10  # the small fire is shown although its weight is 333 times lower
-    assert ids.count(0) >= 5  # the rest of the cap still shows the big fire
+    assert ids.count(0) == 20 and ids.count(1) == 0 and sel.clusters_shown == 1
 
 
-def test_selection_shares_the_priority_budget_between_zones():
-    # A strong fire below Kuching and a weak one below Singapore: round robin, 5 each.
-    clusters = [cluster(0, 0.6, 110.36, 5000.0, "K"), cluster(1, 0.5, 103.82, 30.0, "S")]
-    tracers = tracers_for(clusters, uniform(0.0, 3.0))
-    sel = tj.select_for_export(tracers, clusters, (SINGAPORE, KUCHING), max_trajectories=10,
-                               priority_share=1.0)  # fmt: skip
+def test_lines_are_shared_in_proportion():
+    clusters = [cluster(0, 0.6, 110.36, 3000.0, "K"), cluster(1, 0.5, 103.82, 1000.0, "S")]
+    sel = tj.select_for_export(
+        tracers_for(clusters, uniform(0.0, 3.0)), clusters, max_trajectories=8
+    )
     ids = [t.cluster_id for t in sel.trajectories]
-    assert sel.near_zone == 10 and ids.count(0) == 5 and ids.count(1) == 5
+    assert ids.count(0) == 6 and ids.count(1) == 2
 
 
-def test_selection_follows_each_zone_s_source_breakdown():
-    # Two fires below Singapore. By FRP the first dominates, but the smoke step says nearly all
-    # of Singapore's smoke comes from the second: its lines must come first.
-    clusters = [cluster(0, 0.4, 103.6, 5000.0, "A"), cluster(1, 0.5, 104.0, 50.0, "B")]
-    tracers = tracers_for(clusters, uniform(0.0, 3.0))
-    contribution = np.array([[1.0, 99.0]])  # zone x cluster
-    sel = tj.select_for_export(tracers, clusters, (SINGAPORE,), max_trajectories=10,
-                               priority_share=1.0, contribution=contribution)  # fmt: skip
-    ids = [t.cluster_id for t in sel.trajectories]
-    assert ids.count(1) >= 8
-    plain = tj.select_for_export(tracers, clusters, (SINGAPORE,), max_trajectories=10,
-                                 priority_share=1.0)  # fmt: skip
-    assert [t.cluster_id for t in plain.trajectories].count(0) >= 8  # by FRP alone
+def test_lines_are_spread_over_the_release_times():
+    clusters = [cluster(0, 0.5, 101.5, 480.0)]
+    sel = tj.select_for_export(
+        tracers_for(clusters, uniform(1.0, 2.0)), clusters, max_trajectories=5
+    )
+    assert [t.release_hour for t in sel.trajectories] == [0, 18, 36, 53, 71]
 
 
 def test_selection_respects_the_cap_and_skips_particles_that_never_moved():
@@ -451,31 +447,31 @@ def test_selection_respects_the_cap_and_skips_particles_that_never_moved():
 
     clusters = [cluster(0, 0.5, 101.5, 300.0), cluster(1, 0.5, 99.0, 100.0)]
     tracers = tracers_for(clusters, make_field(fn))
-    sel = tj.select_for_export(tracers, clusters, (SINGAPORE,), max_trajectories=200)
+    sel = tj.select_for_export(tracers, clusters, max_trajectories=200)
     assert {t.cluster_id for t in sel.trajectories} == {1}  # cluster 0 is stuck in the gap
-    assert len(sel.trajectories) == 72
-    small = tj.select_for_export(tracers, clusters, (SINGAPORE,), max_trajectories=7)
+    assert len(sel.trajectories) == 72  # every release of cluster 1, no more exist
+    small = tj.select_for_export(tracers, clusters, max_trajectories=7)
     assert len(small.trajectories) == 7
 
 
-def test_selection_is_reproducible():
+def test_selection_is_deterministic():
     clusters = [cluster(0, 0.5, 103.0, 300.0), cluster(1, -1.0, 104.0, 100.0)]
     tracers = tracers_for(clusters, uniform(1.0, 3.0))
 
-    def pick(seed):
-        sel = tj.select_for_export(tracers, clusters, (SINGAPORE,), max_trajectories=30, seed=seed)
+    def pick():
+        sel = tj.select_for_export(tracers, clusters, max_trajectories=30)
         return [(t.cluster_id, t.hours[0]) for t in sel.trajectories]
 
-    assert pick(1) == pick(1)
-    assert pick(1) != pick(2)
+    assert pick() == pick()
 
 
 def test_selection_output_format():
     clusters = [cluster(0, 0.5, 101.5, 480.0, "Riau")]
     tracers = tracers_for(clusters, uniform(1.234567, 3.21))
-    sel = tj.select_for_export(tracers, clusters, (SINGAPORE,), max_trajectories=100)
+    sel = tj.select_for_export(tracers, clusters, max_trajectories=100)
     t = next(t for t in sel.trajectories if t.hours[0] == 6)
     assert t.cluster_id == 0 and t.source_region == "Riau" and t.hours[-1] == 72
+    assert t.release_hour == 6
     assert all(isinstance(h, int) for h in t.hours)
     assert len(t.path) == len(t.hours) == 67
     assert t.path[0] == (101.5, 0.5)
@@ -485,9 +481,33 @@ def test_selection_output_format():
     json.dumps([asdict(x) for x in sel.trajectories], allow_nan=False)  # valid JSON, no NaN
 
 
+def test_release_hour_before_t0_is_kept():
+    # First seen 10 h before t0 and recorded from t0: the path starts at hour 0, the release at -10.
+    field = uniform(0.0, 3.0, past_hours=24)
+    clusters = [replace(cluster(0, 0.5, 101.5, 480.0), first_at="2026-09-14T04:00:00Z")]
+    parts = tj.release_particles(
+        clusters, particles_per_release=1, t0=field.t0, earliest_hour=-24.0
+    )
+    tracers = tj.trace(field, parts, min_hour=0.0)
+    sel = tj.select_for_export(tracers, clusters, max_trajectories=2)
+    first = sel.trajectories[0]
+    assert first.release_hour == -10 and first.hours[0] == 0
+
+
+def test_hourly_density_conserves_the_smoke_in_the_domain():
+    parts = particles_at([(0.0, 105.0), (2.0, 110.0), (-3.0, 100.0)])
+    density = tj.HourlyDensity(cell_deg=0.5, lifetime_hours=float("inf"))
+    tj.advect(uniform(1.0, 1.0), parts, [density], diffusivity_m2s=0.0)
+    assert density.load.shape == (73, 40, 50)
+    assert np.allclose(density.load.sum(axis=(1, 2)), 1.0)  # three particles of 1/3 each
+    # At t0 the first particle sits in the cell around (0 N, 105 E).
+    row, col = int((0.0 + 8) / 0.5), int((105.0 - 95) / 0.5)
+    assert density.load[0, row, col] == pytest.approx(1 / 3)
+
+
 def test_json_size_and_cluster_rounding():
     clusters = [cluster(0, 0.5, 101.5, 480.0)]
-    sel = tj.select_for_export(tracers_for(clusters, uniform(1.0, 2.0)), clusters, (SINGAPORE,))
+    sel = tj.select_for_export(tracers_for(clusters, uniform(1.0, 2.0)), clusters)
     text = json.dumps([asdict(t) for t in sel.trajectories], separators=(",", ":"))
     assert tj.json_size(sel.trajectories) == len(text.encode())
     (c,) = tj.clusters_for_export([cluster(0, 0.123456, 101.987654, 123.456)])

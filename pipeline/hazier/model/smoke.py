@@ -72,6 +72,7 @@ prints the zone table and the removal sensitivity, and saves pipeline/output/tra
 from __future__ import annotations
 
 import argparse
+import base64
 import logging
 import math
 import sys
@@ -87,11 +88,13 @@ from hazier import config
 from hazier.env import PIPELINE_DIR
 from hazier.geo import EARTH_RADIUS_KM, great_circle_km
 from hazier.model.regions import OTHER, OffshoreSplit, drop_offshore, label_clusters
+from hazier.model.static import StaticSplit, drop_static
 from hazier.model.trajectories import (
     Advection,
     Clustering,
     DensityGrid,
     ExportSelection,
+    HourlyDensity,
     Particles,
     advect,
     cluster_hotspots,
@@ -102,7 +105,7 @@ from hazier.model.trajectories import (
     select_for_export,
     trace,
 )
-from hazier.schema import Hotspot, SmokeModel, SourceCluster, SourceShare, ZoneForecast
+from hazier.schema import Hotspot, SmokeGrid, SmokeModel, SourceCluster, SourceShare, ZoneForecast
 from hazier.sources.winds import WindField
 
 log = logging.getLogger(__name__)
@@ -287,6 +290,7 @@ def to_zone_forecasts(smoke: list[ZoneSmoke]) -> list[ZoneForecast]:
             smoke_eta_earliest_hours=s.eta_earliest,
             smoke_eta_latest_hours=s.eta_latest,
             smoke_sources=s.sources,
+            smoke_index=[round(float(v), 1) for v in s.series],
         )
         for s in smoke
     ]
@@ -306,6 +310,34 @@ def smoke_model_metadata(field: WindField) -> SmokeModel:
     )
 
 
+def smoke_grid_for_export(hourly: HourlyDensity, zone_radius_km: float | None = None) -> SmokeGrid:
+    """The map's smoke layer: the hourly density in smoke-index units, one byte per cell.
+
+    A cell's load is the smoke inside it; spread over a zone's area instead, it is what a zone
+    centred there would read: index = load * (zone area / cell area). So the arrival threshold
+    (10) means the same on the map as on the zone card. Bytes are logarithmic: 0 below
+    SMOKE_GRID_MIN_INDEX, then SMOKE_GRID_STEPS_PER_DECADE steps per factor of ten (40: about 6%
+    per step), base64 encoded. Most cells are empty, so the text compresses well.
+    """
+    r = config.ZONE_RADIUS_KM if zone_radius_km is None else zone_radius_km
+    cell_km = hourly.cell * 111.32
+    cell_area = cell_km * cell_km * np.cos(np.radians(hourly.lats))[None, :, None]
+    index = hourly.load * (math.pi * r * r) / cell_area
+    lo, steps = config.SMOKE_GRID_MIN_INDEX, config.SMOKE_GRID_STEPS_PER_DECADE
+    with np.errstate(divide="ignore"):
+        q = 1 + np.floor(np.log10(np.maximum(index, lo) / lo) * steps)
+    q = np.where(index >= lo, np.clip(q, 1, 255), 0).astype(np.uint8)
+    return SmokeGrid(
+        lats=[round(float(x), 4) for x in hourly.lats],
+        lons=[round(float(x), 4) for x in hourly.lons],
+        hours=[int(h) if float(h).is_integer() else float(h) for h in hourly.hours],
+        cell_deg=hourly.cell,
+        min_index=lo,
+        steps_per_decade=steps,
+        data=base64.b64encode(q.tobytes()).decode("ascii"),
+    )
+
+
 # --- The whole model -----------------------------------------------------------------------
 
 
@@ -314,6 +346,7 @@ class ModelRun:
     clustering: Clustering
     clusters: list[SourceCluster]  # kept clusters with their region
     offshore: OffshoreSplit  # clusters excluded for lying off shore (gas flares)
+    static: StaticSplit  # hotspots excluded as static heat sources (industry, volcanoes)
     n_particles: int  # dispersed particles behind the smoke index
     n_past_particles: int  # of which released before t0
     n_in_air_at_t0: int  # of those, still inside the domain at t0
@@ -324,6 +357,7 @@ class ModelRun:
     sensitivity: dict[float, list[ZoneSmoke]]  # by extra removal lifetime (hours)
     selection: ExportSelection
     density: DensityGrid
+    hourly: HourlyDensity  # smoke per forecast hour, for the map
     timings: dict[str, float]
 
 
@@ -350,7 +384,14 @@ def run_model(
     timings: dict[str, float] = {}
     t = time.perf_counter()
 
-    clustering = cluster_hotspots(hotspots)
+    static = drop_static(hotspots)
+    if static.dropped:
+        log.info(
+            "Excluded %d hotspots on static heat sources (industry, volcanoes), %.0f MW of FRP",
+            len(static.dropped),
+            static.dropped_frp_mw,
+        )
+    clustering = cluster_hotspots(static.kept)
     offshore = drop_offshore(label_clusters(clustering.clusters))
     clusters = offshore.kept
     if offshore.dropped:
@@ -366,7 +407,8 @@ def run_model(
     acc = ZoneAccumulator(zones, len(clusters))
     extra = {tau: ZoneAccumulator(zones, len(clusters), tau) for tau in extra_lifetimes}
     density = DensityGrid()
-    adv = advect(field, particles, [acc, density, *extra.values()])
+    hourly = HourlyDensity()
+    adv = advect(field, particles, [acc, density, hourly, *extra.values()])
     timings["advection with dispersion"] = time.perf_counter() - t
 
     t = time.perf_counter()
@@ -376,7 +418,7 @@ def run_model(
     # Only the forecast part of their paths is kept and shown: a puff released before t0
     # appears on the map where it is at t0.
     tracers = trace(field, tracer_particles, min_hour=0.0, dtype=np.float32)
-    selection = select_for_export(tracers, clusters, zones, contribution=acc.cluster_load)
+    selection = select_for_export(tracers, clusters)
     timings["display tracers and selection"] = time.perf_counter() - t
 
     t = time.perf_counter()
@@ -388,6 +430,7 @@ def run_model(
         clustering=clustering,
         clusters=clusters,
         offshore=offshore,
+        static=static,
         n_particles=len(particles),
         n_past_particles=int((particles.release_hour < 0).sum()),
         n_in_air_at_t0=int(((particles.release_hour < 0) & (adv.end_step >= adv.t0_index)).sum()),
@@ -398,6 +441,7 @@ def run_model(
         sensitivity=sensitivity,
         selection=selection,
         density=density,
+        hourly=hourly,
         timings=timings,
     )
 

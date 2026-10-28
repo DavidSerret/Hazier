@@ -85,7 +85,7 @@ from typing import Protocol
 import numpy as np
 
 from hazier import config
-from hazier.geo import EARTH_RADIUS_M, great_circle_km
+from hazier.geo import EARTH_RADIUS_M
 from hazier.schema import Hotspot, SourceCluster, Trajectory
 from hazier.sources.winds import WindField
 
@@ -564,6 +564,43 @@ class DensityGrid:
         self.load += flat.reshape(self.ny, self.nx)
 
 
+class HourlyDensity:
+    """Observer: Hazier's smoke per forecast hour on a coarse grid, for the map's smoke layer.
+
+    The gridded version of what the zones accumulate: load[j, row, col] sums weight x removal of
+    the particles inside each cell at forecast hour hours[j] (hours >= 0 only). Divided by the
+    cell area and multiplied by the area of a zone (see smoke.smoke_grid_for_export), it is in
+    the same units as a zone's smoke index, so the arrival threshold means the same on the map.
+    """
+
+    def __init__(self, cell_deg: float | None = None, lifetime_hours: float | None = None) -> None:
+        self.cell = config.SMOKE_GRID_CELL_DEG if cell_deg is None else cell_deg
+        self.lifetime_hours = lifetime_hours
+        self.ny = int(np.ceil((config.LAT_MAX - config.LAT_MIN) / self.cell))
+        self.nx = int(np.ceil((config.LON_MAX - config.LON_MIN) / self.cell))
+        # Cell centres, south to north and west to east.
+        self.lats = config.LAT_MIN + (np.arange(self.ny) + 0.5) * self.cell
+        self.lons = config.LON_MIN + (np.arange(self.nx) + 0.5) * self.cell
+
+    def start(self, particles: Particles, hours: np.ndarray) -> None:
+        self._weight = particles.weight
+        self._release = particles.release_hour
+        self._all_hours = hours
+        self._k0 = int(np.searchsorted(hours, -1e-9))
+        self.hours = hours[self._k0 :]
+        self.load = np.zeros((len(self.hours), self.ny, self.nx))
+
+    def observe(self, k: int, idx: np.ndarray, lat: np.ndarray, lon: np.ndarray) -> None:
+        if k < self._k0 or idx.size == 0:
+            return
+        row = np.clip(((lat - config.LAT_MIN) / self.cell).astype(int), 0, self.ny - 1)
+        col = np.clip(((lon - config.LON_MIN) / self.cell).astype(int), 0, self.nx - 1)
+        age = self._all_hours[k] - self._release[idx]
+        w = self._weight[idx] * removal_factor(age, self.lifetime_hours)
+        flat = np.bincount(row * self.nx + col, weights=w, minlength=self.ny * self.nx)
+        self.load[k - self._k0] += flat.reshape(self.ny, self.nx)
+
+
 @dataclass
 class TrajectorySet:
     """Full paths of a (small) set of particles on a common time axis.
@@ -584,6 +621,7 @@ class TrajectorySet:
     release_step: np.ndarray  # (P,)
     end_step: np.ndarray  # (P,)
     fate: np.ndarray  # (P,)
+    release_hour: np.ndarray | None = None  # (P,) hours since t0, negative before it
 
     def fate_counts(self) -> dict[str, int]:
         return {f.name.lower(): int((self.fate == f).sum()) for f in Fate}
@@ -619,6 +657,7 @@ def trace(
         release_step=np.where(gone, 0, release),
         end_step=np.where(gone, -1, end),
         fate=adv.fate,
+        release_hour=particles.release_hour,
     )
 
 
@@ -628,7 +667,7 @@ def trace(
 @dataclass
 class ExportSelection:
     trajectories: list[Trajectory]
-    near_zone: int  # how many of them were chosen because they pass near a zone
+    clusters_shown: int  # clusters with at least one line
 
 
 def _compact_hour(h: float) -> float | int:
@@ -636,107 +675,70 @@ def _compact_hour(h: float) -> float | int:
     return int(h) if h.is_integer() else round(h, 2)
 
 
-def _near_zone(tracers: TrajectorySet, zone: config.Zone, reach_km: float) -> np.ndarray:
-    """True for tracers whose path comes within reach_km of the zone centre."""
-    # Cheap box test on each path's extent first; great-circle distances only for candidates.
-    reach_lat = np.degrees(reach_km / (EARTH_RADIUS_M / 1000))
-    reach_lon = reach_lat / np.cos(np.radians(min(abs(zone.lat) + reach_lat, 89.0)))
-    lat_min, lat_max = np.fmin.reduce(tracers.lat, axis=1), np.fmax.reduce(tracers.lat, axis=1)
-    lon_min, lon_max = np.fmin.reduce(tracers.lon, axis=1), np.fmax.reduce(tracers.lon, axis=1)
-    box = (
-        (lat_min <= zone.lat + reach_lat)
-        & (lat_max >= zone.lat - reach_lat)
-        & (lon_min <= zone.lon + reach_lon)
-        & (lon_max >= zone.lon - reach_lon)
-    )
-    near = np.zeros(len(box), dtype=bool)
-    cand = np.flatnonzero(box)
-    if cand.size:
-        d = great_circle_km(tracers.lat[cand], tracers.lon[cand], zone.lat, zone.lon)
-        near[cand] = np.fmin.reduce(np.where(np.isnan(d), np.inf, d), axis=1) <= reach_km
-    return near
+def allocate_lines(amounts: np.ndarray, cap: int) -> np.ndarray:
+    """Share `cap` lines between clusters in proportion to their smoke (largest remainder).
+
+    A cluster whose share is below half a line gets none: lines follow the smoke, they do not
+    give every small fire a place on the map. Ties go to the larger amount, then the lower index.
+    """
+    total = float(amounts.sum())
+    if total <= 0 or cap <= 0:
+        return np.zeros(len(amounts), dtype=int)
+    exact = amounts / total * cap
+    lines = np.floor(exact).astype(int)
+    left = cap - int(lines.sum())
+    order = np.lexsort((np.arange(len(amounts)), -amounts, -(exact - lines)))
+    for i in order[:left]:
+        lines[i] += 1
+    return lines
 
 
 def select_for_export(
     tracers: TrajectorySet,
     clusters: list[SourceCluster],
-    zones: tuple[config.Zone, ...] | None = None,
     max_trajectories: int | None = None,
-    near_km: float | None = None,
-    priority_share: float | None = None,
     decimals: int | None = None,
-    seed: int | None = None,
-    contribution: np.ndarray | None = None,
 ) -> ExportSelection:
-    """Choose the display trajectories for forecast.json.
+    """Choose the display trajectories for forecast.json: a few flow lines, by smoke amount.
 
-    Showing only the strongest clusters would hide what matters most to a reader: a small fire
-    whose smoke heads for their city. So the cap is filled in two passes:
+    The map shows the smoke itself with the density grid; the lines only show which way it
+    flows. So the cap is shared between clusters in proportion to the smoke they emit over the
+    forecast (the summed weight of their releases that move), with allocate_lines: the large
+    fire complexes get most lines and a small fire usually none, whatever its distance to a
+    zone. Within a cluster the lines are spread evenly over its release times, so they show the
+    flow at different times of the forecast. Deterministic: no random sampling.
 
-    1. Near-zone trajectories: those passing within near_km of a zone's edge. Zones take turns
-       (round robin), so a zone touched only by a small fire still gets its share. Each zone
-       offers its candidates in a random order weighted by how much smoke their cluster brings
-       to that zone (contribution[z, c], from the smoke step), so the lines drawn to a city
-       match its source breakdown; without contribution, by trajectory weight. This pass takes
-       at most priority_share of the cap, so the map keeps some regional context even when
-       many trajectories pass near zones.
-    2. The rest of the cap: the other trajectories, in a random order weighted by weight.
-
-    The weighted random order is Efraimidis-Spirakis sampling without replacement: sorting by
-    log(u) / w with u uniform in (0, 1) draws items with probability proportional to w. The
-    seed makes the selection reproducible. Trajectories that never moved are left out.
-    Coordinates are rounded to `decimals` and whole hours become integers.
+    Each line keeps its weight (the smoke its release carries) and release hour, so the web can
+    draw it with an opacity that follows the smoke left after removal. Coordinates are rounded
+    to `decimals` and whole hours become integers.
     """
-    zones = config.ZONES if zones is None else zones
     cap = config.TRAJ_EXPORT_MAX if max_trajectories is None else max_trajectories
-    near_km = config.TRAJ_EXPORT_NEAR_KM if near_km is None else near_km
-    share = config.TRAJ_EXPORT_PRIORITY_SHARE if priority_share is None else priority_share
     d = config.TRAJ_EXPORT_DECIMALS if decimals is None else decimals
-    rng = np.random.default_rng(config.RANDOM_SEED if seed is None else seed)
-
-    n = len(tracers.weight)
     moved = tracers.end_step > tracers.release_step
-    tiny = np.finfo(float).tiny
-    log_u = np.log(rng.random(n))
-    order = np.argsort(-(log_u / np.maximum(tracers.weight, tiny)), kind="stable")
+    n_clusters = len(clusters)
+    amounts = np.bincount(
+        tracers.cluster_index[moved], weights=tracers.weight[moved], minlength=n_clusters
+    )[:n_clusters]
+    lines = allocate_lines(amounts, cap)
 
-    chosen = np.zeros(n, dtype=bool)
     selected: list[int] = []
-    queues = []
-    for z, zone in enumerate(zones):
-        cand = np.flatnonzero(moved & _near_zone(tracers, zone, zone.radius_km + near_km))
-        if contribution is not None and contribution[z].sum() > 0:
-            w = contribution[z, tracers.cluster_index[cand]]
-        else:
-            w = tracers.weight[cand]
-        queues.append(list(cand[np.argsort(-(log_u[cand] / np.maximum(w, tiny)), kind="stable")]))
-    budget = min(cap, int(cap * share))
-    pointers = [0] * len(queues)
-    progress = True
-    while len(selected) < budget and progress:
-        progress = False
-        for z, queue in enumerate(queues):
-            while pointers[z] < len(queue) and chosen[queue[pointers[z]]]:
-                pointers[z] += 1
-            if pointers[z] < len(queue) and len(selected) < budget:
-                p = queue[pointers[z]]
-                chosen[p] = True
-                selected.append(p)
-                progress = True
-    n_near = len(selected)
+    for c in np.flatnonzero(lines):
+        cand = np.flatnonzero(moved & (tracers.cluster_index == c))
+        cand = cand[np.argsort(tracers.release_step[cand], kind="stable")]
+        n = min(int(lines[c]), len(cand))
+        # Evenly spaced over the cluster's releases, both ends included when n > 1.
+        picks = np.unique(np.round(np.linspace(0, len(cand) - 1, n)).astype(int))
+        selected.extend(int(cand[i]) for i in picks)
 
-    for p in order:
-        if len(selected) >= cap:
-            break
-        if moved[p] and not chosen[p]:
-            chosen[p] = True
-            selected.append(int(p))
-
+    release_hours = tracers.release_hour if tracers.release_hour is not None else None
     selected.sort(key=lambda p: (tracers.cluster_index[p], tracers.release_step[p], p))
     out = []
     for p in selected:
         steps = slice(tracers.release_step[p], tracers.end_step[p] + 1)
         cluster = clusters[tracers.cluster_index[p]]
+        release = (
+            float(release_hours[p]) if release_hours is not None else float(tracers.hours[steps][0])
+        )
         out.append(
             Trajectory(
                 id=len(out),
@@ -748,9 +750,10 @@ def select_for_export(
                 ],
                 hours=[_compact_hour(h) for h in tracers.hours[steps]],
                 source_region=cluster.region,
+                release_hour=_compact_hour(release),
             )
         )
-    return ExportSelection(out, n_near)
+    return ExportSelection(out, int((lines > 0).sum()))
 
 
 def clusters_for_export(clusters: list[SourceCluster]) -> list[SourceCluster]:

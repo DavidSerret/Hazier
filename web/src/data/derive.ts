@@ -63,9 +63,26 @@ export function zonePointAt(
   return best;
 }
 
+/** Colour of a zone at an hour: the category of its hourly PM2.5, the main number. */
 export function zoneColourAt(forecast: Forecast, zone: ZoneForecast, hour: number): Rgb {
   const point = zonePointAt(forecast, zone, hour);
-  return point ? CATEGORY_COLOURS[point.category] : NO_DATA_COLOUR;
+  return point ? CATEGORY_COLOURS[point.hourly_category] : NO_DATA_COLOUR;
+}
+
+/** Hazier smoke index over a zone at a forecast hour (0 outside the series). */
+export function smokeIndexAt(zone: ZoneForecast, hour: number): number {
+  return zone.smoke_index?.[Math.round(hour)] ?? 0;
+}
+
+/** Whether Hazier has smoke over the zone at that hour: at 850 hPa, so "smoke aloft". */
+export function smokeAloft(forecast: Forecast, zone: ZoneForecast, hour: number): boolean {
+  return smokeIndexAt(zone, hour) >= forecast.smoke_model.arrival_threshold;
+}
+
+/** Dark or white text, whichever reads better on a colour (relative luminance). */
+export function textOn([r, g, b]: Rgb): Rgb {
+  const lum = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
+  return lum > 0.55 ? [17, 20, 26] : [255, 255, 255];
 }
 
 /** Sources that need a warning: everything that is not ok. Failed ones first. */

@@ -38,17 +38,24 @@ from __future__ import annotations
 import argparse
 import csv
 import gzip
+import json
 import logging
 import os
 import time
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 
 from hazier import config
 from hazier.env import PIPELINE_DIR, load_env
 from hazier.model.regions import region_names
-from hazier.model.smoke import ModelRun, fmt_eta, run_model, smoke_model_metadata
+from hazier.model.smoke import (
+    ModelRun,
+    fmt_eta,
+    run_model,
+    smoke_grid_for_export,
+    smoke_model_metadata,
+)
 from hazier.model.trajectories import clusters_for_export
 from hazier.schema import Forecast, Hotspot, SourceStatus, ZoneForecast, validate_forecast
 from hazier.sources import ecmwf
@@ -131,7 +138,30 @@ def build_forecast(
         + ([ecmwf.attribution()] if field_.source == ecmwf.SOURCE else []),
         pm25_baseline=baseline_metadata() if cams_zones.series else None,
         pm25_grid=grid_for_export(grid),
+        smoke_grid=smoke_grid_for_export(model.hourly),
     )
+
+
+def part_sizes(forecast: Forecast) -> dict[str, int]:
+    """Bytes of the main parts of forecast.json (compact JSON), for the run summary."""
+
+    def size(value) -> int:
+        return len(json.dumps(_plain(value), separators=(",", ":")).encode())
+
+    return {
+        "trajectories": size(forecast.trajectories),
+        "smoke grid": size(forecast.smoke_grid),
+        "CAMS grid": size(forecast.pm25_grid),
+        "zones": size(forecast.zones),
+        "hotspots": size(forecast.hotspots),
+        "clusters": size(forecast.clusters),
+    }
+
+
+def _plain(value):
+    if isinstance(value, list):
+        return [_plain(v) for v in value]
+    return asdict(value) if value is not None else None
 
 
 def write_atomic(path: Path, text: str) -> None:
@@ -247,6 +277,7 @@ class RunReport:
     source_notes: dict[str, str] = field(default_factory=dict)  # one line per source
     timings: dict[str, float] = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
+    part_sizes: dict[str, int] = field(default_factory=dict)  # bytes of each part of the JSON
     history_file: Path | None = None
     history_rows: int = 0
     total_s: float = 0.0
@@ -315,7 +346,7 @@ def run_pipeline(
             model = timed("smoke model", run_model, firms.hotspots, winds.field)
             t = time.perf_counter()
             forecast = build_forecast(
-                firms.hotspots, winds.field, model, cams_zones, grid, statuses
+                model.static.kept, winds.field, model, cams_zones, grid, statuses
             )
             report.zones = forecast.zones
             report.counts.update(
@@ -324,7 +355,12 @@ def run_pipeline(
                 particles_before_t0=model.n_past_particles,
                 trajectories=len(forecast.trajectories),
                 hotspots_exported=len(forecast.hotspots),
+                static_hotspots=len(model.static.dropped),
+                static_frp_mw=round(model.static.dropped_frp_mw),
+                offshore_clusters=len(model.offshore.dropped),
+                offshore_frp_mw=round(model.offshore.dropped_frp_mw),
             )
+            report.part_sizes = part_sizes(forecast)
             errors = validate_forecast(forecast)
             if errors:
                 report.outcome, report.exit_code, report.errors = "invalid", EXIT_INVALID, errors
@@ -377,20 +413,30 @@ def format_summary(r: RunReport) -> str:
     c = r.counts
     if "clusters" in c:
         lines.append(
+            f"  fires  {c['static_hotspots']} hotspots on static heat sources excluded "
+            f"({c['static_frp_mw']:,} MW), {c['offshore_clusters']} offshore clusters excluded "
+            f"({c['offshore_frp_mw']:,} MW)"
+        )
+        lines.append(
             f"  model  {c['hotspots']:,} hotspots, {c['clusters']} clusters, {c['particles']:,} "
             f"particles ({c['particles_before_t0']:,} before t0), {c['trajectories']} trajectories"
         )
     if r.zones:
-        lines.append(f"  {'zone':<19}{'CAMS now':<24}{'trend':<11}{'smoke ETA':<19}main source")
+        header = f"  {'zone':<19}{'CAMS hourly / 24 h mean':<43}{'trend':<11}{'smoke ETA':<19}main source"
+        lines.append(header)
         for z in r.zones:
             now = (
+                f"{z.cams_now.value_ugm3:5.1f} {z.cams_now.hourly_category.replace('_', ' '):<15}"
                 f"{z.cams_now.basis_ugm3:5.1f} {z.cams_now.category.replace('_', ' ')}"
                 if z.cams_now
                 else "no data"
             )
             eta = fmt_eta(z.smoke_eta_hours, z.smoke_eta_earliest_hours, z.smoke_eta_latest_hours)
             src = f"{main_source(z)} {z.smoke_sources[0].share:.0%}" if main_source(z) else "-"
-            lines.append(f"  {z.name:<19}{now:<24}{z.cams_trend or '-':<11}{eta:<19}{src}")
+            lines.append(f"  {z.name:<19}{now:<43}{z.cams_trend or '-':<11}{eta:<19}{src}")
+    if r.part_sizes:
+        parts = ", ".join(f"{k} {v / 1024:.0f} KB" for k, v in r.part_sizes.items())
+        lines.append(f"  parts  {parts}")
     if r.forecast_path:
         lines.append(
             f"  output {r.forecast_path}  {r.size_bytes / 1024:.0f} KB ({r.gzip_bytes / 1024:.0f} KB "

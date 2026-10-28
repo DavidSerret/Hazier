@@ -1,180 +1,229 @@
-// The deck.gl layers, rebuilt from the forecast, the forecast hour and the selected zone.
+// The deck.gl layers, rebuilt from the forecast, the forecast hour, the zoom and the selection.
 //
-// From the bottom: CAMS PM2.5 colour layer, faint smoke paths, animated smoke trails and
-// particles, fire clusters with a glow, zones and their names. Only the zones are pickable.
+// From the bottom: CAMS PM2.5 category bands, Hazier's smoke haze (grey), a few smoke flow
+// lines, fire clusters, zone markers with their hourly PM2.5 number, a ring where Hazier has
+// smoke over a zone, and the zone names. Zones and fires are pickable.
 
 import type { Layer } from "@deck.gl/core";
 import { TripsLayer } from "@deck.gl/geo-layers";
-import { BitmapLayer, PathLayer, ScatterplotLayer, TextLayer } from "@deck.gl/layers";
-import { zoneColourAt } from "../data/derive";
-import type { Forecast, SourceCluster, ZoneForecast } from "../data/types";
-import { colourAt, rampStops, rasterise, type RampStop } from "./pm25";
-import { headsAt } from "./smoke";
+import { BitmapLayer, ScatterplotLayer, TextLayer } from "@deck.gl/layers";
+import { smokeAloft, textOn, zoneColourAt, zonePointAt } from "../data/derive";
+import type { Forecast, SourceCluster, Trajectory, ZoneForecast } from "../data/types";
+import { bandsFrom, rasterise, type Band } from "./pm25";
+import { decodeSmokeGrid, rasteriseSmoke } from "./smokegrid";
 
 export const ZONE_NAME_SIZE = 12;
 export const ZONE_NAME_SIZE_SELECTED = 14;
 // Zone markers have a fixed size on screen, whatever the zoom: a 50 km circle would cover the
-// city at high zoom. The zone's radius_km still defines the area the model looks at.
-export const ZONE_MARKER_RADIUS = 10;
-export const ZONE_MARKER_RADIUS_SELECTED = 13;
-export const ZONE_NAME_GAP = 4;
+// city at high zoom. They are big enough to hold a three-digit number.
+export const ZONE_MARKER_RADIUS = 14;
+export const ZONE_MARKER_RADIUS_SELECTED = 16;
+const SMOKE_RING_RADIUS = 21;
+export const ZONE_NAME_OFFSET = SMOKE_RING_RADIUS + 3; // names hang below the smoke ring
+const SMOKE_RGB: [number, number, number] = [214, 216, 224];
 
 export type MapState = {
   forecast: Forecast;
   hour: number; // may be fractional while playing; data layers use the nearest whole hour
   selectedZoneId: string | null;
+  zoom: number;
 };
 
-const TRAIL_HOURS = 10;
+export type Picks = {
+  onSelectZone: (zoneId: string) => void;
+  onPickFire: (cluster: SourceCluster, x: number, y: number) => void;
+};
 
-/** Renders and remembers the PM2.5 canvases, one per forecast hour. */
-export class Pm25Images {
-  private cache = new Map<number, HTMLCanvasElement>();
-  private stops: RampStop[];
-  bounds: [number, number, number, number] | null = null;
+// The flow lines show only their recent part, fading behind the moving head.
+const TRAIL_HOURS = 6;
+
+function toCanvas(width: number, height: number, data: Uint8ClampedArray<ArrayBuffer>) {
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  canvas.getContext("2d")?.putImageData(new ImageData(data, width, height), 0, 0);
+  return canvas;
+}
+
+/** Renders and remembers the map images: CAMS bands and smoke haze, one per forecast hour. */
+export class MapImages {
+  private pm25 = new Map<number, HTMLCanvasElement>();
+  private smoke = new Map<number, HTMLCanvasElement>();
+  private bands: Band[];
+  private smokeBytes: Uint8Array | null;
+  pm25Bounds: [number, number, number, number] | null = null;
+  smokeBounds: [number, number, number, number] | null = null;
 
   constructor(private forecast: Forecast) {
-    this.stops = rampStops(forecast.pm25_baseline?.category_upper_bounds);
+    this.bands = bandsFrom(forecast.pm25_baseline?.category_upper_bounds);
+    this.smokeBytes = forecast.smoke_grid ? decodeSmokeGrid(forecast.smoke_grid) : null;
   }
 
-  get(hour: number): HTMLCanvasElement | null {
+  pm25At(hour: number): HTMLCanvasElement | null {
     const grid = this.forecast.pm25_grid;
     if (!grid) return null;
-    const hit = this.cache.get(hour);
+    const hit = this.pm25.get(hour);
     if (hit) return hit;
-    const raster = rasterise(grid, hour, this.stops);
-    this.bounds = raster.bounds;
-    const canvas = document.createElement("canvas");
-    canvas.width = raster.width;
-    canvas.height = raster.height;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return null;
-    ctx.putImageData(new ImageData(raster.data, raster.width, raster.height), 0, 0);
-    this.cache.set(hour, canvas);
-    if (this.cache.size > 80) this.cache.delete(this.cache.keys().next().value as number);
+    const raster = rasterise(grid, hour, this.bands);
+    this.pm25Bounds = raster.bounds;
+    const canvas = toCanvas(raster.width, raster.height, raster.data);
+    this.pm25.set(hour, canvas);
+    if (this.pm25.size > 80) this.pm25.delete(this.pm25.keys().next().value as number);
     return canvas;
   }
 
-  /** The legend gradient: colours for 0 to max µg/m³. */
-  legendColours(max = 120, steps = 24): string[] {
-    return Array.from({ length: steps }, (_, i) => {
-      const [r, g, b] = colourAt((i / (steps - 1)) * max, this.stops);
-      return `rgb(${r}, ${g}, ${b})`;
-    });
+  /** The haze of one whole forecast hour (frame index = hour). */
+  smokeAt(hour: number): HTMLCanvasElement | null {
+    const grid = this.forecast.smoke_grid;
+    if (!grid || !this.smokeBytes || hour < 0 || hour >= grid.hours.length) return null;
+    const hit = this.smoke.get(hour);
+    if (hit) return hit;
+    const threshold = this.forecast.smoke_model.arrival_threshold;
+    const raster = rasteriseSmoke(grid, this.smokeBytes, hour, threshold);
+    this.smokeBounds = raster.bounds;
+    const canvas = toCanvas(raster.width, raster.height, raster.data);
+    this.smoke.set(hour, canvas);
+    if (this.smoke.size > 80) this.smoke.delete(this.smoke.keys().next().value as number);
+    return canvas;
   }
 }
 
-const maxFrp = (clusters: SourceCluster[]) => Math.max(1, ...clusters.map((c) => c.frp_mw));
+/** Smoke left on a flow line at an hour, relative to the heaviest line (0 to 1). */
+export function lineStrength(t: Trajectory, hour: number, lifetime: number, maxWeight: number): number {
+  const age = Math.max(0, hour - t.release_hour);
+  return maxWeight > 0 ? (t.weight * Math.exp(-age / lifetime)) / maxWeight : 0;
+}
 
-function clusterLayers(clusters: SourceCluster[]): Layer[] {
-  const top = maxFrp(clusters);
+/** Fires shrink and dim as the map zooms in, so they never hide the city underneath. */
+export function fireScale(zoom: number): { size: number; alpha: number } {
+  const t = Math.min(1, Math.max(0, (zoom - 5) / 4)); // 0 at zoom 5 or less, 1 at zoom 9
+  return { size: 1 - 0.55 * t, alpha: 1 - 0.6 * t };
+}
+
+function clusterLayers(clusters: SourceCluster[], zoom: number, picks: Picks): Layer[] {
+  const top = Math.max(1, ...clusters.map((c) => c.frp_mw));
+  const { size, alpha } = fireScale(zoom);
   // Core radius in pixels grows with the square root of FRP: the area follows the intensity.
-  const core = (c: SourceCluster) => 2 + 9 * Math.sqrt(c.frp_mw / top);
+  const core = (c: SourceCluster) => (1.5 + 6 * Math.sqrt(c.frp_mw / top)) * size;
   const base = {
     data: clusters,
     getPosition: (c: SourceCluster) => [c.lon, c.lat] as [number, number],
     radiusUnits: "pixels" as const,
     stroked: false,
+    updateTriggers: { getRadius: [size], getFillColor: [alpha] },
   };
   return [
     new ScatterplotLayer<SourceCluster>({
       ...base,
-      id: "fires-glow-outer",
-      getRadius: (c) => core(c) * 3.2,
-      getFillColor: [255, 90, 20, 28],
-    }),
-    new ScatterplotLayer<SourceCluster>({
-      ...base,
-      id: "fires-glow-inner",
-      getRadius: (c) => core(c) * 1.8,
-      getFillColor: [255, 140, 30, 70],
+      id: "fires-glow",
+      getRadius: (c) => core(c) * 2.4,
+      getFillColor: [255, 120, 30, Math.round(45 * alpha)],
     }),
     new ScatterplotLayer<SourceCluster>({
       ...base,
       id: "fires-core",
       getRadius: core,
-      getFillColor: [255, 214, 120, 255],
+      getFillColor: [255, 200, 110, Math.round(235 * alpha)],
+      pickable: true,
+      onClick: ({ object, x, y }) => {
+        if (object) picks.onPickFire(object, x, y);
+        return true;
+      },
     }),
   ];
 }
 
 export function buildLayers(
   state: MapState,
-  images: Pm25Images,
-  onSelect: (zoneId: string) => void,
+  images: MapImages,
+  picks: Picks,
   visibleNames: Set<string> | null = null,
 ): Layer[] {
-  const { forecast, hour, selectedZoneId } = state;
+  const { forecast, hour, selectedZoneId, zoom } = state;
   const step = Math.round(hour);
   const layers: Layer[] = [];
+  const noDepth = { depthCompare: "always" as const };
 
-  const image = images.get(step);
-  if (image && images.bounds) {
+  const pm25 = images.pm25At(step);
+  if (pm25 && images.pm25Bounds) {
     layers.push(
-      new BitmapLayer({
-        id: "pm25",
-        image,
-        bounds: images.bounds,
-        opacity: 1,
-        parameters: { depthCompare: "always" },
-      }),
+      new BitmapLayer({ id: "pm25", image: pm25, bounds: images.pm25Bounds, parameters: noDepth }),
     );
   }
 
-  const trajectories = forecast.trajectories;
+  // Smoke haze: the two whole hours around the current time, cross-faded, so it moves smoothly
+  // while playing without rasterising every frame.
+  const h0 = Math.floor(hour);
+  const f = hour - h0;
+  for (const [h, opacity, id] of [
+    [h0, 1 - f, "smoke-haze-a"],
+    [h0 + 1, f, "smoke-haze-b"],
+  ] as const) {
+    if (opacity <= 0.01) continue;
+    const image = images.smokeAt(h);
+    if (image && images.smokeBounds) {
+      layers.push(
+        new BitmapLayer({ id, image, bounds: images.smokeBounds, opacity, parameters: noDepth }),
+      );
+    }
+  }
+
+  const lifetime = forecast.smoke_model.removal_lifetime_hours;
+  const maxWeight = Math.max(0, ...forecast.trajectories.map((t) => t.weight));
   layers.push(
-    new PathLayer({
-      id: "smoke-paths",
-      data: trajectories,
-      getPath: (t) => t.path,
-      getColor: [200, 196, 255, 34],
-      widthUnits: "pixels",
-      getWidth: 1,
-      parameters: { depthCompare: "always" },
-    }),
-    new TripsLayer({
-      id: "smoke-trails",
-      data: trajectories,
+    new TripsLayer<Trajectory>({
+      id: "smoke-lines",
+      data: forecast.trajectories,
       getPath: (t) => t.path,
       getTimestamps: (t) => t.hours,
-      getColor: [232, 228, 255, 235],
+      // Opacity follows the smoke the line carries now: weight after removal.
+      getColor: (t) => [...SMOKE_RGB, Math.round(30 + 170 * lineStrength(t, hour, lifetime, maxWeight))],
       widthUnits: "pixels",
-      getWidth: 2.5,
+      getWidth: 1.6,
       capRounded: true,
       jointRounded: true,
       trailLength: TRAIL_HOURS,
       currentTime: hour,
       fadeTrail: true,
-      parameters: { depthCompare: "always" },
-    }),
-    new ScatterplotLayer({
-      id: "smoke-heads",
-      data: headsAt(trajectories, hour),
-      getPosition: (d) => d.position,
-      getRadius: 2.2,
-      radiusUnits: "pixels",
-      getFillColor: [255, 255, 255, 215],
-      parameters: { depthCompare: "always" },
+      updateTriggers: { getColor: [step] },
+      parameters: noDepth,
     }),
   );
 
-  layers.push(...clusterLayers(forecast.clusters));
+  layers.push(...clusterLayers(forecast.clusters, zoom, picks));
 
+  const radius = (z: ZoneForecast) =>
+    z.id === selectedZoneId ? ZONE_MARKER_RADIUS_SELECTED : ZONE_MARKER_RADIUS;
+  const aloft = forecast.zones.filter((z) => smokeAloft(forecast, z, step));
   layers.push(
+    new ScatterplotLayer<ZoneForecast>({
+      id: "zone-smoke-ring",
+      data: aloft,
+      getPosition: (z) => [z.lon, z.lat],
+      getRadius: SMOKE_RING_RADIUS,
+      radiusUnits: "pixels",
+      filled: false,
+      stroked: true,
+      getLineColor: [...SMOKE_RGB, 230],
+      getLineWidth: 3,
+      lineWidthUnits: "pixels",
+      parameters: noDepth,
+    }),
     new ScatterplotLayer<ZoneForecast>({
       id: "zones",
       data: forecast.zones,
       getPosition: (z) => [z.lon, z.lat],
-      getRadius: (z) => (z.id === selectedZoneId ? ZONE_MARKER_RADIUS_SELECTED : ZONE_MARKER_RADIUS),
+      getRadius: radius,
       radiusUnits: "pixels",
       stroked: true,
-      getFillColor: (z) => [...zoneColourAt(forecast, z, step), 235],
+      getFillColor: (z) => [...zoneColourAt(forecast, z, step), 245],
       getLineColor: (z) => (z.id === selectedZoneId ? [255, 255, 255, 255] : [12, 14, 18, 230]),
-      getLineWidth: (z) => (z.id === selectedZoneId ? 3.5 : 1.5),
+      getLineWidth: (z) => (z.id === selectedZoneId ? 3 : 1.5),
       lineWidthUnits: "pixels",
       pickable: true,
       onClick: ({ object }) => {
-        if (object) onSelect(object.id);
+        if (object) picks.onSelectZone(object.id);
+        return true;
       },
       updateTriggers: {
         getFillColor: [step],
@@ -182,7 +231,25 @@ export function buildLayers(
         getLineColor: [selectedZoneId],
         getLineWidth: [selectedZoneId],
       },
-      parameters: { depthCompare: "always" },
+      parameters: noDepth,
+    }),
+    new TextLayer<ZoneForecast>({
+      id: "zone-numbers",
+      data: forecast.zones,
+      getPosition: (z) => [z.lon, z.lat],
+      getText: (z) => {
+        const p = zonePointAt(forecast, z, step);
+        return p ? String(Math.round(p.value_ugm3)) : "–";
+      },
+      getSize: 12,
+      getColor: (z) => [...textOn(zoneColourAt(forecast, z, step)), 255],
+      getTextAnchor: "middle",
+      getAlignmentBaseline: "center",
+      fontFamily: "system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif",
+      fontWeight: 700,
+      characterSet: "0123456789–",
+      updateTriggers: { getText: [step], getColor: [step] },
+      parameters: noDepth,
     }),
     new TextLayer<ZoneForecast>({
       id: "zone-names",
@@ -191,10 +258,7 @@ export function buildLayers(
       getText: (z) => z.name,
       getSize: (z) => (z.id === selectedZoneId ? ZONE_NAME_SIZE_SELECTED : ZONE_NAME_SIZE),
       getColor: [255, 255, 255, 255],
-      getPixelOffset: (z) => [
-        0,
-        (z.id === selectedZoneId ? ZONE_MARKER_RADIUS_SELECTED : ZONE_MARKER_RADIUS) + ZONE_NAME_GAP,
-      ],
+      getPixelOffset: [0, ZONE_NAME_OFFSET],
       getTextAnchor: "middle",
       getAlignmentBaseline: "top",
       fontFamily: "system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif",
@@ -202,8 +266,8 @@ export function buildLayers(
       fontSettings: { sdf: true },
       outlineWidth: 3,
       outlineColor: [10, 12, 16, 235],
-      updateTriggers: { getSize: [selectedZoneId], getPixelOffset: [selectedZoneId] },
-      parameters: { depthCompare: "always" },
+      updateTriggers: { getSize: [selectedZoneId] },
+      parameters: noDepth,
     }),
   );
   return layers;

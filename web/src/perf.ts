@@ -7,6 +7,8 @@ type Hooks = {
   draw: () => void;
   /** Screen position [x, y] in CSS pixels of a zone centre, to click on it in tests. */
   zonePixel: (id: string) => [number, number] | null;
+  /** Screen position of the strongest fire cluster, to tap it in tests. */
+  firePixel: () => [number, number] | null;
   selectedZone: () => string | null;
 };
 
@@ -28,6 +30,7 @@ export function installPerf(hooks: Hooks): { record: (ms: number) => void } {
 
   (window as unknown as Record<string, unknown>).__hazier = {
     zonePixel: hooks.zonePixel,
+    firePixel: hooks.firePixel,
     selectedZone: hooks.selectedZone,
     setHour: hooks.setHour,
     async bench(frames = 240, maxHour = 72): Promise<BenchResult> {

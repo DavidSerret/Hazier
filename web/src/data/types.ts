@@ -5,7 +5,9 @@
 // Coordinates are [lon, lat] pairs. "hours" and "hour" are offsets from generated_at.
 
 // 2: smoke_model.wind_source, wind_run and wind_grid_deg; pm25_grid.source.
-export const SCHEMA_VERSION = 2;
+// 3: hourly CAMS points with hourly_category; zone smoke_index; trajectory release_hour;
+//    smoke_grid; pm25_grid holds hourly values.
+export const SCHEMA_VERSION = 3;
 
 // Malaysian API categories, used for CAMS PM2.5 concentrations: the air quality shown to users.
 export type Pm25Category =
@@ -49,6 +51,9 @@ export interface Trajectory {
   path: [number, number][];
   hours: number[];
   source_region: string;
+  // Hour of the release (negative before t0, when the path starts at 0). The smoke left on
+  // the line at hour h is weight * exp(-(h - release_hour) / removal_lifetime_hours).
+  release_hour: number;
 }
 
 export interface SourceShare {
@@ -64,7 +69,8 @@ export interface Pm25Point {
   time: string;
   value_ugm3: number; // CAMS hourly value at the zone centre
   basis_ugm3: number; // trailing mean the category is based on
-  category: Pm25Category;
+  category: Pm25Category; // of basis_ugm3: the official-style value
+  hourly_category: Pm25Category; // the same limits on the hourly value: the main number
 }
 
 // One zone: air quality from CAMS; smoke timing and origin from Hazier. The level shown to
@@ -86,6 +92,9 @@ export interface ZoneForecast {
   cams_trend: Trend | null;
   cams_pm25: Pm25Point[]; // empty when CAMS has no data for the zone
   agreement: AgreementFlag | null;
+  // Hazier's smoke index over the zone at forecast hours 0 .. 72. At or above
+  // smoke_model.arrival_threshold the smoke is over the zone at 850 hPa ("smoke aloft").
+  smoke_index: number[];
 }
 
 // ok: all data arrived. degraded: usable but incomplete, show a warning.
@@ -122,7 +131,7 @@ export interface Pm25Baseline {
 
 // CAMS PM2.5 on a regular grid for the map colour layer. values is row-major (frame, lat, lon),
 // latitude south to north, longitude west to east; concentration = value * quantum_ugm3, null
-// = missing. Same averaging basis as the zone categories.
+// = missing. Hourly values since schema 3 (averaging_hours 1).
 export interface Pm25Grid {
   lats: number[];
   lons: number[];
@@ -131,6 +140,20 @@ export interface Pm25Grid {
   quantum_ugm3: number;
   values: (number | null)[];
   source: string; // for example "CAMS global via the Copernicus Atmosphere Data Store (0.4 degrees)"
+}
+
+// Hazier's smoke per forecast hour on a coarse grid. data is base64 of one byte per (hour, lat,
+// lon), row-major, latitude south to north; a byte q > 0 stands for a smoke index of
+// min_index * 10 ** ((q - 1) / steps_per_decade), 0 for less than min_index. Same units as a
+// zone's smoke index. Smoke at 850 hPa, not a ground concentration.
+export interface SmokeGrid {
+  lats: number[]; // cell centres, ascending
+  lons: number[];
+  hours: number[];
+  cell_deg: number;
+  min_index: number;
+  steps_per_decade: number;
+  data: string;
 }
 
 // How Hazier's smoke timing and attribution were made. Not an air quality measure.
@@ -158,5 +181,6 @@ export interface Forecast {
   attributions: Attribution[];
   pm25_baseline: Pm25Baseline | null; // null when the CAMS step produced nothing
   pm25_grid: Pm25Grid | null; // null when the CAMS grid could not be fetched
+  smoke_grid: SmokeGrid | null; // Hazier's smoke per hour for the map
   schema_version: number;
 }

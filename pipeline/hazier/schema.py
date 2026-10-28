@@ -16,6 +16,7 @@ relies on; the pipeline runs it before writing forecast.json.
 
 from __future__ import annotations
 
+import base64
 import json
 import math
 import types
@@ -25,7 +26,9 @@ from datetime import datetime
 from typing import Literal
 
 # 2: smoke_model.wind_source, wind_run and wind_grid_deg; pm25_grid.source.
-SCHEMA_VERSION = 2
+# 3: hourly CAMS points with hourly_category; zone smoke_index; trajectory release_hour;
+#    smoke_grid; pm25_grid holds hourly values.
+SCHEMA_VERSION = 3
 
 # Malaysian API categories, used for CAMS PM2.5 concentrations: the air quality shown to users.
 Pm25Category = Literal["good", "moderate", "unhealthy", "very_unhealthy", "hazardous"]
@@ -77,6 +80,9 @@ class Trajectory:
     path: list[tuple[float, float]]  # (lon, lat) per step, from release to the end
     hours: list[float]  # hours since generated_at, same length as path; starts at the release
     source_region: str = ""  # region of the cluster; filled by the attribution step
+    # Hour of the release (negative before t0, when the path starts at 0). With weight, gives
+    # the smoke left after removal: weight * exp(-(hour - release_hour) / lifetime).
+    release_hour: float = 0.0
 
 
 @dataclass
@@ -92,7 +98,10 @@ class Pm25Point:
     # Mean over the trailing Pm25Baseline.averaging_hours hours (the hour and those before it),
     # the value the category is based on. Equal to value_ugm3 when the averaging is 1 hour.
     basis_ugm3: float
-    category: Pm25Category  # Malaysian API category of basis_ugm3
+    category: Pm25Category  # Malaysian API category of basis_ugm3 (the official-style value)
+    # The same category limits applied to the hourly value: the main number shown, an
+    # indication only, since the official API is defined on the 24 h mean.
+    hourly_category: Pm25Category = "good"
 
 
 @dataclass
@@ -123,6 +132,10 @@ class ZoneForecast:
     cams_trend: Trend | None = None  # next 24 h against the last 24 h
     cams_pm25: list[Pm25Point] = field(default_factory=list)  # every few hours, see Pm25Baseline
     agreement: AgreementFlag | None = None  # null when there is nothing to compare with
+    # Hazier's smoke index over the zone at each forecast hour 0 .. 72 (internal units, 0.1
+    # steps). At or above smoke_model.arrival_threshold the smoke is over the zone at 850 hPa
+    # ("smoke aloft": it may not reach the ground).
+    smoke_index: list[float] = field(default_factory=list)
 
 
 @dataclass
@@ -175,8 +188,8 @@ class Pm25Grid:
 
     values holds one integer per (frame, lat, lon), row-major: frame first, then latitude
     (south to north), then longitude (west to east). The concentration is value * quantum_ugm3;
-    null marks a missing value. Each value is the trailing averaging_hours mean, the same basis
-    as the zone categories, so the map and the cards use the same colours for the same air.
+    null marks a missing value. Each value is the trailing averaging_hours mean; averaging_hours
+    is 1 since schema 3: the map shows the hourly value, like the main number of the zone cards.
     """
 
     lats: list[float]  # ascending
@@ -188,6 +201,26 @@ class Pm25Grid:
     # Where the grid comes from, for example "CAMS global via the Copernicus Atmosphere Data
     # Store (0.4 degrees)", or the coarser Open-Meteo fallback.
     source: str = ""
+
+
+@dataclass
+class SmokeGrid:
+    """Hazier's smoke per forecast hour on a coarse grid, for the map's smoke layer.
+
+    data is base64 of one byte per (hour, lat, lon), row-major: hour first, then latitude
+    (south to north), then longitude (west to east). A byte q stands for a smoke index of
+    min_index * 10 ** ((q - 1) / steps_per_decade); 0 means below min_index. The index is in the
+    same units as a zone's smoke index (smoke per zone area), so it can be compared with
+    smoke_model.arrival_threshold. It is smoke at 850 hPa, not a ground concentration.
+    """
+
+    lats: list[float]  # cell centres, ascending
+    lons: list[float]  # cell centres, ascending
+    hours: list[float]  # hours since generated_at of each frame
+    cell_deg: float
+    min_index: float
+    steps_per_decade: int
+    data: str
 
 
 @dataclass
@@ -219,6 +252,7 @@ class Forecast:
     attributions: list[Attribution] = field(default_factory=list)
     pm25_baseline: Pm25Baseline | None = None  # null when the CAMS step produced nothing
     pm25_grid: Pm25Grid | None = None  # null when the CAMS grid could not be fetched
+    smoke_grid: SmokeGrid | None = None  # Hazier's smoke per hour for the map
     schema_version: int = SCHEMA_VERSION
 
     def to_dict(self) -> dict:
@@ -330,4 +364,12 @@ def validate_forecast(fc: Forecast) -> list[str]:
     g = fc.pm25_grid
     if g is not None and len(g.values) != len(g.hours) * len(g.lats) * len(g.lons):
         errors.append("pm25_grid: values do not match hours x lats x lons")
+    s = fc.smoke_grid
+    if s is not None:
+        try:
+            n = len(base64.b64decode(s.data, validate=True))
+        except (ValueError, TypeError):
+            n = -1
+        if n != len(s.hours) * len(s.lats) * len(s.lons):
+            errors.append("smoke_grid: data does not match hours x lats x lons")
     return errors

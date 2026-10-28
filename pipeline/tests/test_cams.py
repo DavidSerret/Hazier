@@ -333,26 +333,29 @@ def test_apply_to_zones_fills_series_peak_and_flag(api):
     # Rising by 0.1 per hour: the next 24 h mean (25.05) is 2.4 above the last 24 h mean
     # (22.65), inside the margin of max(15% of 22.65, 3) = 3.4: stable.
     assert kl.cams_trend == "stable"
-    assert [p.time for p in kl.cams_pm25[:2]] == ["2026-09-14T14:00:00Z", "2026-09-14T17:00:00Z"]
-    assert len(kl.cams_pm25) == 25 and kl.cams_pm25[-1].time == "2026-09-17T14:00:00Z"
+    assert [p.time for p in kl.cams_pm25[:2]] == ["2026-09-14T14:00:00Z", "2026-09-14T15:00:00Z"]
+    assert len(kl.cams_pm25) == 73 and kl.cams_pm25[-1].time == "2026-09-17T14:00:00Z"
     first = kl.cams_pm25[0]
     assert first.value_ugm3 == pytest.approx(23.8, abs=0.05)  # 20 + 0.1 * 38
     assert first.basis_ugm3 == pytest.approx(22.7, abs=0.05)
     assert first.category == "moderate"
+    # The hourly value has its own category: the main number on the card.
+    assert first.hourly_category == cams.pm25_category(first.value_ugm3) == "moderate"
     # The series rises every hour, so the peak is the last one (even between exported points).
     assert kl.cams_peak.time == "2026-09-17T14:00:00Z"
     assert kl.cams_peak.value_ugm3 == pytest.approx(20 + 0.1 * (NOW_INDEX + 72), abs=0.05)
     assert kl.cams_peak.category == cams.pm25_category(kl.cams_peak.basis_ugm3)
 
 
-def test_peak_is_found_between_the_exported_points(api, monkeypatch):
+def test_peak_is_found_at_any_hour(api, monkeypatch):
     monkeypatch.setattr(config, "PM25_AVERAGING_HOURS", 1)  # the basis is the hourly value
     spike = default_series(0)
-    spike[NOW_INDEX + 1] = 5000.0  # hour 1: not on the 3-hourly export grid
+    spike[NOW_INDEX + 1] = 5000.0  # a one-hour spike at hour 1
     api.series[0] = spike
     kl = cams.apply_to_zones([zone_forecast(config.ZONES[0], False)], cams.fetch_cams(now=NOW))[0]
     assert kl.cams_peak.time == "2026-09-14T15:00:00Z"
-    assert "2026-09-14T15:00:00Z" not in [p.time for p in kl.cams_pm25]
+    spike_point = next(p for p in kl.cams_pm25 if p.time == "2026-09-14T15:00:00Z")
+    assert spike_point.hourly_category == "hazardous"  # every hour is exported
 
 
 def test_agreement_per_zone(api):
@@ -397,7 +400,7 @@ def test_attribution_names_cams_and_open_meteo():
 
 def test_baseline_metadata():
     meta = cams.baseline_metadata()
-    assert meta.resolution_km == 45.0 and meta.step_hours == 3 and meta.averaging_hours == 24
+    assert meta.resolution_km == 45.0 and meta.step_hours == 1 and meta.averaging_hours == 24
     assert meta.category_upper_bounds["hazardous"] is None  # open ended, valid JSON
     assert meta.category_upper_bounds["good"] == BOUNDS["good"]
     assert meta.cams_elevated_category == "unhealthy"
@@ -524,7 +527,7 @@ def test_grid_export_is_quantised_and_compact(grid_api, tmp_path):
     )
     assert exported.hours == list(range(0, 73, 3))  # one frame every 3 h
     assert len(exported.values) == 25 * GRID_POINTS
-    assert exported.averaging_hours == 24 and exported.quantum_ugm3 == 1.0
+    assert exported.averaging_hours == 1 and exported.quantum_ugm3 == 1.0  # hourly values
     # Row-major (frame, lat, lon): frame 0, lat index 11 (3 N), lon index 6 (101 E).
     assert exported.values[11 * 26 + 6] == round(grid_value(3.0, 101.0))
     assert all(isinstance(v, int) for v in exported.values if v is not None)

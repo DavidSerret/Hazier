@@ -1,9 +1,9 @@
 name: forecast
 
 on:
-  # TODO: re-enable the 6-hourly schedule after a first successful manual run on GitHub.
-  # schedule:
-  #   - cron: "0 */6 * * *"
+  # Every 6 hours (UTC). A scheduled run always deploys; a manual run deploys only with "deploy".
+  schedule:
+    - cron: "0 */6 * * *"
   workflow_dispatch:
     inputs:
       deploy:

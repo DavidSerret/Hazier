@@ -125,8 +125,10 @@ describe("derived values", () => {
   it("picks the CAMS point nearest to the forecast hour", () => {
     const zone = forecast.zones[0];
     expect(zonePointAt(forecast, zone, 0)?.time).toBe(zone.cams_pm25[0].time);
-    expect(zonePointAt(forecast, zone, 4)?.time).toBe(zone.cams_pm25[1].time); // 3 h is closer
-    expect(zonePointAt(forecast, zone, 5)?.time).toBe(zone.cams_pm25[2].time); // 6 h is closer
+    // Hourly points since schema 3: hour 4 is the fifth point; 4.4 rounds to it as well.
+    expect(zonePointAt(forecast, zone, 4)?.time).toBe(zone.cams_pm25[4].time);
+    expect(zonePointAt(forecast, zone, 4.4)?.time).toBe(zone.cams_pm25[4].time);
+    expect(zone.cams_pm25).toHaveLength(73);
   });
   it("greys out a zone without CAMS data", () => {
     const zone = { ...forecast.zones[0], cams_pm25: [] };

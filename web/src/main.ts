@@ -7,10 +7,11 @@ import { DEFAULT_ZONE_ID } from "./data/derive";
 import { forecastUrl, loadForecast, ageHours, ForecastError } from "./data/load";
 import { advance, hasNow, nowHour } from "./data/timeline";
 import type { Forecast } from "./data/types";
-import { buildLayers, Pm25Images, ZONE_MARKER_RADIUS, ZONE_NAME_GAP } from "./map/layers";
+import { buildLayers, MapImages, ZONE_NAME_OFFSET } from "./map/layers";
 import { visibleLabels, type LabelBox } from "./map/labels";
 import { showBanners, showError, showLoaded, showLoading } from "./ui/banners";
 import { initCard, renderCard } from "./ui/card";
+import { hideFire, showFire } from "./ui/fire";
 import { $ } from "./ui/dom";
 import { initInfo, showInfo } from "./ui/info";
 import { setPlaying, setTimelineHour, showLegend, showTimeline } from "./ui/timeline";
@@ -55,9 +56,16 @@ map.on("moveend", () => {
   updateLabels();
   schedule();
 });
+// Fires shrink and dim with the zoom; the popup closes when the map moves or is clicked.
+map.on("zoom", () => schedule());
+map.on("movestart", () => hideFire());
+map.on("click", () => hideFire(true));
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") hideFire();
+});
 
 let forecast: Forecast | null = null;
-let images: Pm25Images | null = null;
+let images: MapImages | null = null;
 let age = 0; // hours since the forecast was made (0 for the sample)
 let hour = 0; // forecast hour on the timeline; fractional while playing
 let playing = false;
@@ -72,7 +80,12 @@ const hiddenLayers = query.has("perf") ? (query.get("hide") ?? "").split(",").fi
 function draw(): void {
   if (!forecast || !images) return;
   const started = performance.now();
-  let layers = buildLayers({ forecast, hour, selectedZoneId }, images, selectZone, visibleNames);
+  let layers = buildLayers(
+    { forecast, hour, selectedZoneId, zoom: map.getZoom() },
+    images,
+    { onSelectZone: selectZone, onPickFire: showFire },
+    visibleNames,
+  );
   // Benchmark aid (?perf&hide=pm25,fires): switch layers off by id prefix to see what costs most.
   if (hiddenLayers.length) layers = layers.filter((l) => !hiddenLayers.some((h) => l.id.startsWith(h)));
   overlay.setProps({ layers });
@@ -87,7 +100,7 @@ function updateLabels(): void {
     return {
       id: z.id,
       x: p.x,
-      y: p.y + ZONE_MARKER_RADIUS + ZONE_NAME_GAP,
+      y: p.y + ZONE_NAME_OFFSET,
       text: z.name,
       priority: z.id === selectedZoneId ? 10 : 0,
     };
@@ -122,7 +135,7 @@ function syncUi(force = false): void {
       verified: forecast.pm25_baseline?.categories_verified ?? true,
     });
   }
-  renderZoneList(forecast, selectedZoneId, step, selectZone);
+  renderZoneList(forecast, selectedZoneId, step, age, selectZone);
 }
 
 function setHour(next: number): void {
@@ -138,8 +151,8 @@ function selectZone(id: string): void {
   schedule();
 }
 
-// Playback. Time moves smoothly (the trails glide between hours); the colour layer, the zone
-// markers and the card step once per forecast hour.
+// Playback. Time moves smoothly (the lines glide and the smoke haze cross-fades between hours);
+// the colour layer, the zone markers and the card step once per forecast hour.
 function playFrame(now: number): void {
   if (!playing || !forecast) return;
   const dt = Math.min(0.1, (now - lastFrame) / 1000); // a hidden tab must not jump ahead
@@ -231,7 +244,7 @@ async function start(): Promise<void> {
   const horizon = forecast.horizon_hours;
   // The sample is old by definition; treat it as made now so its card reads like a live one.
   age = isSample ? 0 : Math.max(0, ageHours(forecast));
-  images = new Pm25Images(forecast);
+  images = new MapImages(forecast);
   // Open on the current time. A forecast older than its horizon has no "now": open on its start.
   hour = hasNow(age, horizon) ? Math.round(nowHour(age, horizon)) : 0;
   lastStep = -1;
@@ -263,6 +276,12 @@ if (query.has("perf")) {
       setHour: (h) => setHour(h),
       draw,
       selectedZone: () => selectedZoneId,
+      firePixel: () => {
+        const top = forecast?.clusters.reduce((a, b) => (b.frp_mw > a.frp_mw ? b : a));
+        if (!top) return null;
+        const p = map.project([top.lon, top.lat]);
+        return [p.x, p.y];
+      },
       zonePixel: (id) => {
         const zone = forecast?.zones.find((z) => z.id === id);
         if (!zone) return null;

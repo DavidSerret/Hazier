@@ -196,7 +196,10 @@ def test_run_model_end_to_end():
     assert zones["klang_valley"].smoke_sources[0].region == "Riau"
     assert zones["kuching"].smoke_eta_hours is None and zones["kuching"].smoke_sources == []
     assert zones["klang_valley"].cams_now is None  # filled later by the CAMS step
-    assert run.selection.near_zone > 0 and len(run.selection.trajectories) == 72
+    assert run.selection.clusters_shown == 1
+    assert len(run.selection.trajectories) == min(72, config.TRAJ_EXPORT_MAX)
+    assert run.hourly.load.shape[0] == 73 and run.hourly.load.sum() > 0
+    assert len(zones["klang_valley"].smoke_index) == 73 and run.static.dropped == []
     assert run.density.load.sum() > 0
     # Sensitivity runs share the advection: same zones, ordered by lifetime.
     peaks = [s[0].peak for s in (run.sensitivity[48.0], run.smoke, run.sensitivity[120.0])]

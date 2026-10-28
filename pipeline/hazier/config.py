@@ -115,6 +115,13 @@ CLUSTER_CELL_DEG = 0.25
 # Starting value, tuned on the October 2026 data (see docs/methodology.md).
 CLUSTER_MIN_FRP_MW = 25.0
 
+# Static heat sources (gas flares, power plants, mills, volcanoes) are not vegetation fires.
+# Their cells come from hazier/data/static_sources.json (FIRMS archive type field and a
+# persistence rule, see scripts/build_static_sources.py). A hotspot within this many cells
+# (0.004 degrees, about 440 m) of a static cell is dropped before clustering, which covers
+# the 375 m pixel and its geolocation error.
+STATIC_REACH_CELLS = 1
+
 # Particle release: every cluster releases PARTICLES_PER_RELEASE particles at t0 and then every
 # RELEASE_INTERVAL_HOURS until the end of the horizon, as if the fires kept burning.
 # The interval must be a multiple of STEP_HOURS. Hourly releases keep consecutive puffs about
@@ -135,13 +142,18 @@ HORIZONTAL_DIFFUSIVITY_M2S = 2.0e4
 # identical forecasts.
 RANDOM_SEED = 2026
 
-# Trajectories exported to forecast.json. The smoke model uses all particles; the web gets this many
-# display trajectories (one undispersed tracer per release, see trajectories.py).
-TRAJ_EXPORT_MAX = 300
-# A trajectory passing within this distance of a zone's edge is "near" that zone and shown first.
-TRAJ_EXPORT_NEAR_KM = 50.0
-# Near-zone trajectories take at most this share of the cap; the rest keeps regional context.
-TRAJ_EXPORT_PRIORITY_SHARE = 0.6
+# Trajectories exported to forecast.json: a few flow lines for the map. The smoke model uses all
+# particles, and the smoke itself is shown by the density grid below. The lines are shared out
+# between clusters in proportion to the smoke they emit, so a small fire gets none.
+TRAJ_EXPORT_MAX = 60
+
+# Smoke density grid for the map: Hazier's smoke per hour on a coarse grid (see model/smoke.py).
+# 0.5 degrees (about 55 km) matches the spread of a puff after a day of travel (60 km), so a
+# finer grid would only show particle noise. Values are written on a log scale in one byte:
+# 0 below SMOKE_GRID_MIN_INDEX, then SMOKE_GRID_STEPS_PER_DECADE steps per factor of ten.
+SMOKE_GRID_CELL_DEG = 0.5
+SMOKE_GRID_MIN_INDEX = 1.0  # a tenth of the arrival threshold
+SMOKE_GRID_STEPS_PER_DECADE = 40
 # 0.01 degrees is about 1.1 km: finer than the model can resolve, coarse enough to stay small.
 TRAJ_EXPORT_DECIMALS = 2
 
@@ -244,8 +256,9 @@ CAMS_FORECAST_DAYS = 4  # as WIND_FORECAST_DAYS: covers the current hour plus 72
 CAMS_TIMEOUT_S = 60
 CAMS_RETRIES = 1
 CAMS_BACKOFF_S = 10.0
-# The series in forecast.json has one point every this many hours (CAMS is 3-hourly upstream).
-CAMS_EXPORT_STEP_HOURS = 3
+# The series in forecast.json has one point every this many hours. Hourly: the hourly value is
+# the main number shown, because the 24 h mean lags hours behind a change in the air.
+CAMS_EXPORT_STEP_HOURS = 1
 
 # Agreement between Hazier and CAMS over the window (see cams.agreement_flag): Hazier sees smoke
 # when its smoke index reaches SMOKE_ARRIVAL_THRESHOLD, CAMS when its peak category reaches
@@ -282,6 +295,9 @@ CAMS_GRID_BATCH_SIZE = 50
 CAMS_GRID_MAX_CALLS_PER_MIN = 250
 # Exported values are rounded to this step (ug/m3) and written as integers.
 CAMS_GRID_QUANTUM_UGM3 = 1.0
+# The map layer has one frame every this many hours (the web interpolates in between): hourly
+# frames would triple its size for little visible change.
+CAMS_GRID_EXPORT_STEP_HOURS = 3
 
 # --- Export (python -m hazier) ---------------------------------------------------------------
 

@@ -93,4 +93,11 @@ export function showLegend(): void {
     item.append(dot, el("span", "", CATEGORY_LABELS[category]));
     list.append(item);
   }
+  // Hazier smoke: grey haze on the map, grey ring around a zone with smoke aloft.
+  const smoke = el("li", "flex items-center gap-1");
+  const swatch = el("span", "inline-block h-2.5 w-2.5 rounded-full border-2 border-slate-300");
+  swatch.style.background = "rgb(214 216 224 / 0.45)";
+  smoke.append(swatch, el("span", "", "Smoke aloft (Hazier)"));
+  smoke.title = "Grey haze and rings: Hazier smoke at about 1.5 km. It may not reach the ground.";
+  list.append(smoke);
 }

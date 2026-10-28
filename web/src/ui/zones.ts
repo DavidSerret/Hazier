@@ -1,13 +1,36 @@
-// Desktop zone list: a plain list in the left panel to switch the selected zone.
+// Desktop zone list: hourly PM2.5, category, trend and smoke arrival, to switch the selected zone.
 
-import { CATEGORY_LABELS, NO_DATA_COLOUR, zoneColourAt, zonePointAt } from "../data/derive";
-import type { Forecast } from "../data/types";
+import {
+  CATEGORY_LABELS,
+  NO_DATA_COLOUR,
+  smokeAloft,
+  textOn,
+  zoneColourAt,
+  zonePointAt,
+} from "../data/derive";
+import type { Forecast, Trend, ZoneForecast } from "../data/types";
 import { $, el, rgb } from "./dom";
+
+const TREND_ARROW: Record<Trend, string> = { improving: "↓", stable: "→", worsening: "↑" };
+const TREND_WORD: Record<Trend, string> = {
+  improving: "getting better",
+  stable: "steady",
+  worsening: "getting worse",
+};
+
+/** Short smoke arrival for the list, counted from now. */
+export function shortEta(zone: ZoneForecast, ageHours: number): string {
+  const eta = zone.smoke_eta_hours;
+  if (eta === null) return "no smoke";
+  const left = eta - Math.max(0, ageHours);
+  return left <= 0 ? "smoke now" : `smoke in ${Math.max(1, Math.round(left))} h`;
+}
 
 export function renderZoneList(
   forecast: Forecast,
   selectedId: string | null,
   hour: number,
+  ageHours: number,
   onSelect: (zoneId: string) => void,
 ): void {
   const box = $("zones");
@@ -26,13 +49,25 @@ export function renderZoneList(
     );
     button.type = "button";
     if (selected) button.setAttribute("aria-current", "true");
-    const dot = el("span", "inline-block h-3 w-3 shrink-0 rounded-full");
-    dot.style.background = rgb(point ? zoneColourAt(forecast, zone, hour) : NO_DATA_COLOUR);
-    button.append(
-      dot,
-      el("span", "flex-1", zone.name),
-      el("span", "text-xs text-slate-400", point ? CATEGORY_LABELS[point.category] : "no data"),
+    const colour = point ? zoneColourAt(forecast, zone, hour) : NO_DATA_COLOUR;
+    const badge = el(
+      "span",
+      "inline-flex h-7 w-9 shrink-0 items-center justify-center rounded-md text-xs font-bold tabular-nums",
+      point ? String(Math.round(point.value_ugm3)) : "–",
     );
+    badge.style.background = rgb(colour);
+    badge.style.color = rgb(textOn(colour));
+    if (smokeAloft(forecast, zone, hour)) badge.style.boxShadow = "0 0 0 2px rgb(214 216 224)";
+
+    const text = el("span", "min-w-0 flex-1");
+    text.append(el("span", "block truncate", zone.name));
+    const sub = point
+      ? `${CATEGORY_LABELS[point.hourly_category]}${zone.cams_trend ? ` ${TREND_ARROW[zone.cams_trend]}` : ""}`
+      : "no data";
+    text.append(el("span", "block text-xs text-slate-400", sub));
+    if (zone.cams_trend) text.title = `Next 24 h: ${TREND_WORD[zone.cams_trend]}`;
+
+    button.append(badge, text, el("span", "shrink-0 text-xs text-sky-200/90", shortEta(zone, ageHours)));
     button.onclick = () => onSelect(zone.id);
     const item = el("li", "");
     item.append(button);
