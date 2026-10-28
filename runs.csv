@@ -1,3 +1,4 @@
 run_at,t0,outcome,firms,winds,cams,wind_source,grid_source,hotspots,clusters,klang_valley_pm25,klang_valley_eta,klang_valley_source,johor_bahru_pm25,johor_bahru_eta,johor_bahru_source,melaka_seremban_pm25,melaka_seremban_eta,melaka_seremban_source,ipoh_pm25,ipoh_eta,ipoh_source,penang_pm25,penang_eta,penang_source,kuantan_pm25,kuantan_eta,kuantan_source,singapore_pm25,singapore_eta,singapore_source,kuching_pm25,kuching_eta,kuching_source
 2026-10-24T11:29:31Z,2026-10-24T11:00:00Z,written,ok,ok,ok,ecmwf_open_data,ads,9193,295,52.8,,,78.3,0,Jambi,40.4,,,11.2,,,13.3,,,17.2,0,Jambi,55.8,0,Jambi,49.7,0,West Kalimantan
 2026-10-28T17:38:24Z,2026-10-28T17:00:00Z,written,ok,ok,ok,ecmwf_open_data,ads,884,44,35.3,,,19.8,,,10.6,,,5.8,,,13.5,,,2.9,,,24.2,,,14,17,East Kalimantan
+2026-10-28T21:59:53Z,2026-10-28T21:00:00Z,written,ok,ok,ok,ecmwf_open_data,ads,1403,67,28.9,,,38.1,,,12.8,,,6.2,,,13.6,,,7,,,25.4,,,14.2,8,East Kalimantan
