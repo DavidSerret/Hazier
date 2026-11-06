@@ -29,3 +29,4 @@ run_at,t0,outcome,firms,winds,cams,wind_source,grid_source,hotspots,clusters,kla
 2026-11-05T13:42:42Z,2026-11-05T13:00:00Z,written,ok,ok,ok,ecmwf_open_data,ads,2143,119,29,,,20.9,,,7.4,,,4.8,,,8.5,,,3.7,,,10.9,,,10.4,15,Central Kalimantan
 2026-11-05T23:02:00Z,2026-11-05T23:00:00Z,written,ok,ok,ok,ecmwf_open_data,ads,2459,125,27.3,,,19.3,,,8.3,,,5.1,,,12.2,,,3.2,,,14.2,,,8.7,23,Central Kalimantan
 2026-11-06T04:11:24Z,2026-11-06T04:00:00Z,written,ok,ok,ok,ecmwf_open_data,ads,1122,61,28,,,18.2,,,8.7,,,5.4,,,13.5,,,2.7,,,14.2,,,8.8,,
+2026-11-06T13:26:36Z,2026-11-06T13:00:00Z,written,ok,ok,ok,ecmwf_open_data,ads,1375,87,28.9,,,18.4,,,8.7,,,5.8,,,13.3,,,2.4,,,17.7,,,10.3,,
