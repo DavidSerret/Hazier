@@ -85,3 +85,4 @@ run_at,t0,outcome,firms,winds,cams,wind_source,grid_source,hotspots,clusters,kla
 2026-11-26T16:00:21Z,2026-11-26T16:00:00Z,written,ok,ok,ok,ecmwf_open_data,ads,315,17,26.5,,,13.3,,,7.4,,,4.7,,,11,,,2.4,,,19.8,,,7.4,,
 2026-11-27T01:17:34Z,2026-11-27T01:00:00Z,written,ok,ok,ok,ecmwf_open_data,ads,213,9,26.6,,,12.8,,,7.6,,,5.2,,,13.2,,,3,,,19.8,,,8.1,,
 2026-11-27T15:49:57Z,2026-11-27T15:00:00Z,written,ok,ok,ok,ecmwf_open_data,ads,278,11,25.2,,,11.9,,,7.3,,,6.5,,,11.7,,,3.6,,,17.6,,,7.3,,
+2026-11-28T00:50:42Z,2026-11-28T00:00:00Z,written,ok,ok,ok,ecmwf_open_data,ads,127,2,25.3,,,12.7,,,7,,,6,,,12.9,,,4.5,,,17.7,,,6.5,,
